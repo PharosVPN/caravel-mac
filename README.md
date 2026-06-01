@@ -47,4 +47,4 @@ go run ./cmd/caravel-mac --help
 sudo go run ./cmd/caravel-mac --profile ~/Downloads/test.pharos   # needs root for utun
 ```
 
-Licensed AGPL-3.0-or-later, matching the rest of PharosVPN.
+Licensed Apache-2.0, matching the rest of PharosVPN.
