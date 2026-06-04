@@ -101,7 +101,7 @@ connect flags:
 // openStore opens the on-disk profile store
 // (~/Library/Application Support/PharosVPN/profiles).
 func openStore() (*profile.Store, error) {
-	base, err := os.UserConfigDir()
+	base, err := pharosBase()
 	if err != nil {
 		return nil, err
 	}

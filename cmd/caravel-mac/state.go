@@ -7,10 +7,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"syscall"
 	"time"
 )
+
+// sharedStatePath is a fixed, system-wide location the root tunnel worker writes
+// and the unprivileged menu-bar / `status` read. It must not depend on which
+// user is running (connect runs as root via sudo or the osascript auth prompt,
+// where the per-user config dir would resolve to root's). It holds no secrets.
+const sharedStateFile = "/Library/Application Support/PharosVPN/state.json"
+
+// pharosBase returns the Application Support base for the profile store. When
+// running as root via sudo, it targets the *invoking* user's home (SUDO_USER),
+// so `sudo caravel-mac connect --profile NAME` finds the user's store rather
+// than root's empty one. (The menu-bar passes absolute paths, so this only
+// matters for the sudo-from-a-terminal case.)
+func pharosBase() (string, error) {
+	if su := os.Getenv("SUDO_USER"); su != "" && os.Geteuid() == 0 {
+		if u, err := user.Lookup(su); err == nil && u.HomeDir != "" {
+			return filepath.Join(u.HomeDir, "Library", "Application Support"), nil
+		}
+	}
+	return os.UserConfigDir()
+}
 
 // State is the running-tunnel state caravel-mac writes while connected, so other
 // processes (the menu-bar UI, `caravel-mac status`) can see what's up and find
@@ -23,56 +44,29 @@ type State struct {
 	Since    time.Time `json:"since"`
 }
 
-// stateDir is ~/Library/Application Support/PharosVPN.
-func stateDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(base, "PharosVPN")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-func statePath() (string, error) {
-	dir, err := stateDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "state.json"), nil
-}
-
-// writeState records the running tunnel (world-readable so a non-root menu-bar
-// can read it; it holds no secrets).
+// writeState records the running tunnel at the shared path (world-readable so a
+// non-root menu-bar can see it; it holds no secrets). The worker runs as root,
+// so it can create the system directory.
 func writeState(s State) error {
-	p, err := statePath()
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(sharedStateFile), 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	return os.WriteFile(sharedStateFile, data, 0o644)
 }
 
 // clearState removes the running-tunnel record.
 func clearState() {
-	if p, err := statePath(); err == nil {
-		_ = os.Remove(p)
-	}
+	_ = os.Remove(sharedStateFile)
 }
 
 // readState returns the recorded tunnel state, or (zero, false) if none is
 // recorded or the recorded worker is no longer alive (a stale record).
 func readState() (State, bool) {
-	p, err := statePath()
-	if err != nil {
-		return State{}, false
-	}
-	data, err := os.ReadFile(p)
+	data, err := os.ReadFile(sharedStateFile)
 	if err != nil {
 		return State{}, false
 	}

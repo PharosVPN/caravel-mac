@@ -101,12 +101,22 @@ type tunnelState struct {
 	Since    time.Time `json:"since"`
 }
 
+// sharedStateFile is the fixed location the root worker writes (see caravel-mac).
+const sharedStateFile = "/Library/Application Support/PharosVPN/state.json"
+
+// pharosDir is the per-user store base (the menu-bar runs unprivileged).
 func pharosDir() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return ""
 	}
 	return filepath.Join(base, "PharosVPN")
+}
+
+// profilePath is the absolute store path for a profile name — passed to the root
+// worker, which can't resolve the user's store itself.
+func profilePath(name string) string {
+	return filepath.Join(pharosDir(), "profiles", name+".pharos")
 }
 
 func listProfiles() []string {
@@ -120,7 +130,7 @@ func listProfiles() []string {
 }
 
 func readState() (tunnelState, bool) {
-	data, err := os.ReadFile(filepath.Join(pharosDir(), "state.json"))
+	data, err := os.ReadFile(sharedStateFile)
 	if err != nil {
 		return tunnelState{}, false
 	}
@@ -146,10 +156,12 @@ func processAlive(pid int) bool {
 // macOS authorization prompt, backgrounded so the worker keeps running.
 func connectProfile(name string) {
 	bin := caravelBin()
-	// Single-quote the shell args; the whole shell command is then a
-	// double-quoted AppleScript string (no embedded double quotes to escape).
+	// Pass the absolute profile path — the worker runs as root and can't resolve
+	// the user's store. Single-quote the shell args; the whole shell command is
+	// then a double-quoted AppleScript string (no embedded double quotes).
+	path := profilePath(name)
 	shellCmd := fmt.Sprintf("'%s' connect --profile '%s' >/tmp/caravel-mac.log 2>&1 &",
-		strings.ReplaceAll(bin, "'", ""), strings.ReplaceAll(name, "'", ""))
+		strings.ReplaceAll(bin, "'", ""), strings.ReplaceAll(path, "'", ""))
 	osa := fmt.Sprintf("do shell script %q with administrator privileges", shellCmd)
 	_ = exec.Command("osascript", "-e", osa).Run()
 }

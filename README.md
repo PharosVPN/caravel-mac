@@ -35,16 +35,49 @@ size (xray-core dominates); the exported API stays tiny (`Connect`/`Disconnect`)
 
 ## Status
 
-Scaffold. The CLI flow and the macOS `utun`/routing shell are laid out; the core
-AmneziaWG engine (`amneziawg-go`) is the next step — that's what turns this into
-a working client and our `buoy` connectivity test.
+Working. The AmneziaWG engine (in the `caravel` core's `vp` package) is real,
+the macOS `utun`/routing shell brings a tunnel up, and the client speaks the
+real `.pharos` profile format the controller exports.
 
-## Develop
+- **`.pharos` profiles** — the core parses all three modes: `none` (plaintext),
+  `password` (Argon2id + XChaCha20-Poly1305), and `account` (sealed to a device;
+  needs the device key + the controller's signing key — the sync flow, still to
+  come). A node's AmneziaWG params resolve to a dialable endpoint + obfuscation.
+- **CLI** — `import` / `list` / `rm` / `status` / `connect` (by stored profile,
+  a `.pharos` path, or a legacy `--config` JSON).
+- **Menu-bar UI** — `cmd/caravel-menubar`: an unprivileged tray app that lists
+  profiles and connects/disconnects via the macOS authorization prompt (no
+  privileged daemon). The root tunnel worker is `caravel-mac` itself.
+
+Still ahead: XRay/REALITY behind the same engine, account-sync (gRPC + device
+keystore) to fetch account-mode profiles, and the gomobile bridge for iOS/Android.
+
+## Use
 
 ```sh
-# from a checkout that sits beside ../caravel (the core)
-go run ./cmd/caravel-mac --help
-sudo go run ./cmd/caravel-mac --profile ~/Downloads/test.pharos   # needs root for utun
+# build (from a checkout beside ../caravel, the core)
+go install ./cmd/caravel-mac ./cmd/caravel-menubar
+
+caravel-mac import ~/Downloads/edge.pharos --name edge   # store a profile
+caravel-mac list
+sudo caravel-mac connect --profile edge                  # password-prompted if needed
+caravel-mac status                                        # from any shell
+caravel-menubar &                                         # the menu-bar UI
+
+# legacy / quick test with an inline JSON config:
+sudo caravel-mac connect --config test.json
+```
+
+## Live test
+
+`scripts/livetest.sh` stands up a throwaway AmneziaWG server on DigitalOcean and
+writes a matching profile, so you can verify the whole client end to end:
+
+```sh
+./scripts/livetest.sh up        # spins a server, writes ./livetest/test.pharos
+sudo caravel-mac connect --profile ./livetest/test.pharos
+curl -s https://ifconfig.me      # should print the server's IP
+./scripts/livetest.sh down       # destroy the server
 ```
 
 Licensed Apache-2.0, matching the rest of PharosVPN.
