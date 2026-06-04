@@ -64,6 +64,14 @@ func dispatch(args []string) error {
 		return cmdRemove(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
+	case "daemon":
+		return cmdDaemon(args[1:])
+	case "ctl":
+		return cmdCtl(args[1:])
+	case "install-helper":
+		return cmdInstallHelper(args[1:])
+	case "uninstall-helper":
+		return cmdUninstallHelper(args[1:])
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -299,27 +307,33 @@ func specFromConfig(path string) (dialSpec, error) {
 }
 
 // specFromProfile loads a .pharos profile (from the store by name, or a file
-// path), decrypts it, and resolves the chosen node to a dialSpec.
+// path) and resolves the chosen node to a dialSpec, prompting for a password if
+// one is needed (the interactive CLI path).
 func specFromProfile(ref, nodeID string, password *string) (dialSpec, error) {
 	data, err := loadProfileBytes(ref)
 	if err != nil {
 		return dialSpec{}, err
 	}
-
-	// A first parse tells us whether a password is needed; prompt then retry.
-	p, err := profile.Parse(data, profile.Options{Password: *password})
+	spec, err := resolveProfileSpec(data, nodeID, *password)
 	if errors.Is(err, profile.ErrPasswordNeeded) && *password == "" {
 		pw, perr := promptPassword(fmt.Sprintf("password for profile %q: ", ref))
 		if perr != nil {
 			return dialSpec{}, perr
 		}
 		*password = pw
-		p, err = profile.Parse(data, profile.Options{Password: pw})
+		spec, err = resolveProfileSpec(data, nodeID, pw)
 	}
+	return spec, err
+}
+
+// resolveProfileSpec decrypts a .pharos and resolves the chosen node to a
+// dialSpec, without prompting — the form the daemon uses (the password, if any,
+// is supplied by the caller).
+func resolveProfileSpec(data []byte, nodeID, password string) (dialSpec, error) {
+	p, err := profile.Parse(data, profile.Options{Password: password})
 	if err != nil {
 		return dialSpec{}, err
 	}
-
 	node, err := p.Node(nodeID)
 	if err != nil {
 		return dialSpec{}, err

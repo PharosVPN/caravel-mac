@@ -128,14 +128,22 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    // connect installs the root helper once (one authorization prompt), then
+    // brings the tunnel up over the helper's control socket — no prompt per
+    // connect after the first install.
     func connect() {
         guard !selectedProfile.isEmpty else { lastError = "no profile selected"; return }
         status = .connecting
         lastError = nil
         let path = Profiles.path(selectedProfile).path
-        let cmd = "'\(caravelBin())' connect --profile '\(shellSafe(path))' >/tmp/caravel-mac.log 2>&1 &"
         Task.detached {
-            let err = runAdmin(cmd)
+            if !helperInstalled() {
+                if let err = ensureHelper() {
+                    await MainActor.run { [weak self] in self?.lastError = err; self?.status = .disconnected }
+                    return
+                }
+            }
+            let err = runCtl(["connect", path])
             await MainActor.run { [weak self] in
                 if let err { self?.lastError = err; self?.status = .disconnected }
             }
@@ -143,24 +151,54 @@ final class TunnelController: ObservableObject {
     }
 
     func disconnect() {
-        guard let pid = state?.pid else { status = .disconnected; return }
         status = .disconnecting
         Task.detached {
-            let err = runAdmin("kill \(pid)")
+            let err = runCtl(["disconnect"])
             await MainActor.run { [weak self] in if let err { self?.lastError = err } }
         }
     }
+}
 
-    private func caravelBin() -> String {
-        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("caravel-mac").path,
-           FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
-        if let v = ProcessInfo.processInfo.environment["CARAVEL_MAC_BIN"], !v.isEmpty { return v }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for c in ["\(home)/go/bin/caravel-mac", "/usr/local/bin/caravel-mac", "/opt/homebrew/bin/caravel-mac"] {
-            if FileManager.default.isExecutableFile(atPath: c) { return c }
-        }
-        return "caravel-mac"
+// caravelBinPath locates the worker: bundled in the .app, else a dev install.
+func caravelBinPath() -> String {
+    if let bundled = Bundle.main.resourceURL?.appendingPathComponent("caravel-mac").path,
+       FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+    if let v = ProcessInfo.processInfo.environment["CARAVEL_MAC_BIN"], !v.isEmpty { return v }
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    for c in ["\(home)/go/bin/caravel-mac", "/usr/local/bin/caravel-mac", "/opt/homebrew/bin/caravel-mac"] {
+        if FileManager.default.isExecutableFile(atPath: c) { return c }
     }
+    return "caravel-mac"
+}
+
+// helperInstalled reports whether the root LaunchDaemon is installed.
+func helperInstalled() -> Bool {
+    FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/org.pharosvpn.caravel.helper.plist")
+}
+
+// ensureHelper installs the privileged helper via the system authorization
+// prompt (the one and only password the user is asked for). Returns an error
+// message, or nil on success.
+func ensureHelper() -> String? {
+    runAdmin("'\(caravelBinPath())' install-helper")
+}
+
+// runCtl drives the daemon over its control socket via `caravel-mac ctl …` — no
+// privilege needed (the daemon already holds root). Returns an error string or nil.
+func runCtl(_ args: [String]) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: caravelBinPath())
+    p.arguments = ["ctl"] + args
+    let errPipe = Pipe()
+    p.standardError = errPipe
+    p.standardOutput = Pipe()
+    do { try p.run(); p.waitUntilExit() } catch { return error.localizedDescription }
+    if p.terminationStatus != 0 {
+        let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let msg = String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return msg.isEmpty ? "ctl exited \(p.terminationStatus)" : msg
+    }
+    return nil
 }
 
 // processAlive reports whether a pid names a live process (kill -0).
