@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/PharosVPN/caravel/core/profile"
 	"github.com/PharosVPN/caravel/core/vp"
@@ -61,6 +62,8 @@ func dispatch(args []string) error {
 		return cmdList(args[1:])
 	case "rm", "remove":
 		return cmdRemove(args[1:])
+	case "status":
+		return cmdStatus(args[1:])
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -80,6 +83,7 @@ func usage() {
   caravel-mac import <file.pharos> [--name NAME]   store a profile
   caravel-mac list                                 list stored profiles
   caravel-mac rm <name>                            forget a profile
+  caravel-mac status                               show whether a tunnel is up
   sudo caravel-mac connect --profile NAME [--password PW] [--node ID]
   sudo caravel-mac connect --config FILE.json      legacy inline JSON config
 
@@ -242,6 +246,17 @@ func cmdConnect(args []string) error {
 		return err
 	}
 	defer tn.Close()
+
+	// Record the running tunnel so the menu-bar UI / `caravel-mac status` can see
+	// it and stop it; clear it on the way out.
+	_ = writeState(State{
+		Profile:  spec.label,
+		Iface:    tn.iface,
+		Endpoint: spec.cfg.Endpoint,
+		PID:      os.Getpid(),
+		Since:    time.Now(),
+	})
+	defer clearState()
 
 	fmt.Printf("caravel-mac: tunnel up on %s → %s (%s, full-tunnel=%v). Ctrl-C to disconnect.\n",
 		tn.iface, spec.cfg.Endpoint, spec.label, *fullTunnel)
