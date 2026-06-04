@@ -2,97 +2,484 @@
 // Copyright (C) 2026 The PharosVPN Authors
 
 // Command caravel-mac is the macOS PharosVPN client and the platform's
-// connectivity test harness. It reads a profile, asks the caravel core to dial
-// the tunnel, and (on macOS) routes traffic through a utun device.
+// connectivity test harness. It imports `.pharos` profiles (the format the
+// controller exports), brings up an AmneziaWG tunnel via the caravel core over a
+// utun, and routes traffic through it.
 //
-// The protocol logic (AmneziaWG, later XRay) lives in the caravel core, not
-// here; this binary is the thin macOS shell — CLI, utun, routing. See README.
+// Subcommands (run connect as root — utun + route changes need it):
+//
+//	caravel-mac import <file.pharos> [--name NAME]   # store a profile
+//	caravel-mac list                                 # list stored profiles
+//	caravel-mac rm <name>                            # forget a profile
+//	sudo caravel-mac connect --profile NAME [--password PW]
+//	sudo caravel-mac connect --config test.json      # legacy inline JSON
+//
+// A `.pharos` profile in `password` mode prompts for / takes --password;
+// `none` (plaintext) needs nothing; `account` mode (sealed to a device) needs
+// the device key + the controller's signing key (the sync flow — future work).
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
+
+	"github.com/PharosVPN/caravel/core/profile"
+	"github.com/PharosVPN/caravel/core/vp"
+	"github.com/amnezia-vpn/amneziawg-go/device"
+	"github.com/amnezia-vpn/amneziawg-go/tun"
+	"golang.org/x/term"
 )
 
-// config is the resolved tunnel configuration, from a .pharos profile or flags.
-type config struct {
-	profilePath string
-	protocol    string // "amneziawg" (default) or "xray"
-	endpoint    string
-	publicKey   string
-	presharedKey string
-}
-
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "caravel-mac:", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string) error {
-	fs := flag.NewFlagSet("caravel-mac", flag.ContinueOnError)
-	var cfg config
-	fs.StringVar(&cfg.profilePath, "profile", "", "path to a .pharos profile")
-	fs.StringVar(&cfg.protocol, "protocol", "amneziawg", "protocol: amneziawg | xray")
-	fs.StringVar(&cfg.endpoint, "endpoint", "", "server endpoint host:port (without a profile)")
-	fs.StringVar(&cfg.publicKey, "public-key", "", "server public key (without a profile)")
-	fs.StringVar(&cfg.presharedKey, "preshared-key", "", "optional preshared key")
-	if err := fs.Parse(args); err != nil {
-		return err
+func dispatch(args []string) error {
+	if len(args) == 0 {
+		usage()
+		return errors.New("a subcommand is required")
 	}
-	if cfg.profilePath == "" && cfg.endpoint == "" {
-		fs.Usage()
-		return fmt.Errorf("need --profile or --endpoint")
+	switch args[0] {
+	case "connect":
+		return cmdConnect(args[1:])
+	case "import":
+		return cmdImport(args[1:])
+	case "list", "ls":
+		return cmdList(args[1:])
+	case "rm", "remove":
+		return cmdRemove(args[1:])
+	case "-h", "--help", "help":
+		usage()
+		return nil
+	default:
+		// Back-compat: `caravel-mac --config x` (a leading flag) means connect.
+		if strings.HasPrefix(args[0], "-") {
+			return cmdConnect(args)
+		}
+		usage()
+		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
 
-	// Cancel on SIGINT/SIGTERM so the tunnel tears down cleanly.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+func usage() {
+	fmt.Fprint(os.Stderr, `caravel-mac — PharosVPN macOS client
 
-	c, err := connect(ctx, cfg)
+  caravel-mac import <file.pharos> [--name NAME]   store a profile
+  caravel-mac list                                 list stored profiles
+  caravel-mac rm <name>                            forget a profile
+  sudo caravel-mac connect --profile NAME [--password PW] [--node ID]
+  sudo caravel-mac connect --config FILE.json      legacy inline JSON config
+
+connect flags:
+  --profile NAME|PATH   a stored profile name, or a path to a .pharos file
+  --config PATH         a JSON tunnel config (legacy / testing)
+  --password PW         password for a password-mode profile (prompted if omitted)
+  --node ID             which node in the profile to use (default: the first)
+  --full-tunnel         route all traffic through the tunnel (default true)
+`)
+}
+
+// ───────── store ─────────
+
+// openStore opens the on-disk profile store
+// (~/Library/Application Support/PharosVPN/profiles).
+func openStore() (*profile.Store, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	return profile.NewStore(filepath.Join(base, "PharosVPN", "profiles"))
+}
+
+func cmdImport(args []string) error {
+	// Parse <file> + optional --name in any order (the stdlib flag package stops
+	// at the first positional, so we scan manually).
+	var src, name string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--name" || a == "-name":
+			if i+1 >= len(args) {
+				return errors.New("--name needs a value")
+			}
+			name = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
+		case !strings.HasPrefix(a, "-") && src == "":
+			src = a
+		default:
+			return fmt.Errorf("unexpected argument %q (usage: caravel-mac import <file.pharos> [--name NAME])", a)
+		}
+	}
+	if src == "" {
+		return errors.New("usage: caravel-mac import <file.pharos> [--name NAME]")
+	}
+	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	n := name
+	if n == "" {
+		n = strings.TrimSuffix(filepath.Base(src), profile.Extension)
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	path, err := st.Import(n, data)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("imported profile %q → %s\n", n, path)
+	return nil
+}
 
-	fmt.Printf("caravel-mac: %s tunnel up to %s — Ctrl-C to disconnect\n", cfg.protocol, c.endpoint())
+func cmdList(args []string) error {
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	entries, err := st.List()
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Printf("no profiles in %s — import one with `caravel-mac import <file.pharos>`\n", st.Dir())
+		return nil
+	}
+	fmt.Printf("profiles in %s:\n", st.Dir())
+	for _, e := range entries {
+		fmt.Printf("  %-24s  (%s)\n", e.Name, e.Enc)
+	}
+	return nil
+}
+
+func cmdRemove(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: caravel-mac rm <name>")
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	if err := st.Remove(args[0]); err != nil {
+		return err
+	}
+	fmt.Printf("removed profile %q\n", args[0])
+	return nil
+}
+
+// ───────── connect ─────────
+
+// fileConfig is the legacy inline JSON config (--config), kept for testing.
+type fileConfig struct {
+	Endpoint        string         `json:"endpoint"`
+	ServerPublicKey string         `json:"server_public_key"`
+	PrivateKey      string         `json:"private_key"`
+	PresharedKey    string         `json:"preshared_key"`
+	Address         string         `json:"address"`
+	AllowedIPs      []string       `json:"allowed_ips"`
+	Keepalive       int            `json:"keepalive"`
+	MTU             int            `json:"mtu"`
+	Obfuscation     vp.Obfuscation `json:"obfuscation"`
+}
+
+// dialSpec is the unified tunnel input both --config and --profile resolve to.
+type dialSpec struct {
+	cfg     vp.Config
+	address string // bare utun IP
+	mtu     int
+	label   string // for logs
+}
+
+func cmdConnect(args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	profileRef := fs.String("profile", "", "a stored profile name, or a path to a .pharos file")
+	cfgPath := fs.String("config", "", "a JSON tunnel config (legacy / testing)")
+	password := fs.String("password", "", "password for a password-mode profile (prompted if omitted)")
+	nodeID := fs.String("node", "", "which node in the profile to use (default: the first)")
+	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the tunnel")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if (*profileRef == "") == (*cfgPath == "") {
+		return errors.New("give exactly one of --profile or --config")
+	}
+
+	var spec dialSpec
+	var err error
+	if *cfgPath != "" {
+		spec, err = specFromConfig(*cfgPath)
+	} else {
+		spec, err = specFromProfile(*profileRef, *nodeID, password)
+	}
+	if err != nil {
+		return err
+	}
+
+	if os.Geteuid() != 0 {
+		return errors.New("must run as root (utun + routes) — re-run with sudo")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	tn, err := connect(spec, *fullTunnel)
+	if err != nil {
+		return err
+	}
+	defer tn.Close()
+
+	fmt.Printf("caravel-mac: tunnel up on %s → %s (%s, full-tunnel=%v). Ctrl-C to disconnect.\n",
+		tn.iface, spec.cfg.Endpoint, spec.label, *fullTunnel)
 	<-ctx.Done()
 	fmt.Println("\ncaravel-mac: disconnecting")
 	return nil
 }
 
-// conn is a live tunnel. It wraps the caravel core engine plus the macOS utun
-// and route state.
-type conn struct {
-	cfg config
+// specFromConfig builds a dialSpec from a legacy JSON config file.
+func specFromConfig(path string) (dialSpec, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return dialSpec{}, err
+	}
+	var fc fileConfig
+	if err := json.Unmarshal(raw, &fc); err != nil {
+		return dialSpec{}, fmt.Errorf("parse config: %w", err)
+	}
+	if fc.Address == "" {
+		return dialSpec{}, errors.New("config needs an address")
+	}
+	mtu := fc.MTU
+	if mtu == 0 {
+		mtu = 1420
+	}
+	return dialSpec{
+		cfg: vp.Config{
+			PrivateKey:      fc.PrivateKey,
+			ServerPublicKey: fc.ServerPublicKey,
+			PresharedKey:    fc.PresharedKey,
+			Endpoint:        fc.Endpoint,
+			AllowedIPs:      fc.AllowedIPs,
+			Keepalive:       fc.Keepalive,
+			Obfuscation:     fc.Obfuscation,
+		},
+		address: fc.Address,
+		mtu:     mtu,
+		label:   "config",
+	}, nil
 }
 
-func (c *conn) endpoint() string { return c.cfg.endpoint }
+// specFromProfile loads a .pharos profile (from the store by name, or a file
+// path), decrypts it, and resolves the chosen node to a dialSpec.
+func specFromProfile(ref, nodeID string, password *string) (dialSpec, error) {
+	data, err := loadProfileBytes(ref)
+	if err != nil {
+		return dialSpec{}, err
+	}
 
-// Close tears down the tunnel, removes routes, and closes the utun.
-func (c *conn) Close() error {
-	// TODO: core.Disconnect + restore routes + close utun.
+	// A first parse tells us whether a password is needed; prompt then retry.
+	p, err := profile.Parse(data, profile.Options{Password: *password})
+	if errors.Is(err, profile.ErrPasswordNeeded) && *password == "" {
+		pw, perr := promptPassword(fmt.Sprintf("password for profile %q: ", ref))
+		if perr != nil {
+			return dialSpec{}, perr
+		}
+		*password = pw
+		p, err = profile.Parse(data, profile.Options{Password: pw})
+	}
+	if err != nil {
+		return dialSpec{}, err
+	}
+
+	node, err := p.Node(nodeID)
+	if err != nil {
+		return dialSpec{}, err
+	}
+	tun, err := node.Tunnel()
+	if err != nil {
+		return dialSpec{}, err
+	}
+	return dialSpec{
+		cfg: vp.Config{
+			PrivateKey:      tun.PrivateKey,
+			ServerPublicKey: tun.ServerPublicKey,
+			PresharedKey:    tun.PresharedKey,
+			Endpoint:        tun.Endpoint,
+			AllowedIPs:      tun.AllowedIPs,
+			Keepalive:       tun.Keepalive,
+			Obfuscation:     toVPObfuscation(tun.Obfuscation),
+		},
+		address: tun.Address,
+		mtu:     tun.MTU,
+		label:   fmt.Sprintf("%s/%s", p.FleetID, tun.NodeName),
+	}, nil
+}
+
+// loadProfileBytes resolves a --profile reference: a readable file path, else a
+// stored profile name.
+func loadProfileBytes(ref string) ([]byte, error) {
+	if data, err := os.ReadFile(ref); err == nil {
+		return data, nil
+	}
+	st, err := openStore()
+	if err != nil {
+		return nil, err
+	}
+	data, err := st.Raw(ref)
+	if errors.Is(err, profile.ErrProfileNotFound) {
+		return nil, fmt.Errorf("no profile %q (not a file path, not in %s)", ref, st.Dir())
+	}
+	return data, err
+}
+
+// toVPObfuscation maps a profile obfuscation set to the engine's.
+func toVPObfuscation(o profile.Obfuscation) vp.Obfuscation {
+	return vp.Obfuscation{
+		Jc: o.Jc, Jmin: o.Jmin, Jmax: o.Jmax,
+		S1: o.S1, S2: o.S2, S3: o.S3, S4: o.S4,
+		H1: o.H1, H2: o.H2, H3: o.H3, H4: o.H4,
+		I1: o.I1, I2: o.I2, I3: o.I3, I4: o.I4, I5: o.I5,
+	}
+}
+
+// promptPassword reads a password from the terminal without echo.
+func promptPassword(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	pw, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	return strings.TrimSpace(string(pw)), nil
+}
+
+// ───────── tunnel (utun + routing) ─────────
+
+// tunnel is a running tunnel plus the host network state to undo on close.
+type tunnel struct {
+	vt    *vp.Tunnel
+	iface string
+	undo  []string // route specs to delete on close
+}
+
+func connect(spec dialSpec, full bool) (*tunnel, error) {
+	dev, err := tun.CreateTUN("utun", spec.mtu)
+	if err != nil {
+		return nil, fmt.Errorf("create utun: %w", err)
+	}
+	name, err := dev.Name()
+	if err != nil {
+		dev.Close()
+		return nil, err
+	}
+
+	vt, err := vp.Up(spec.cfg, dev, device.LogLevelError)
+	if err != nil {
+		dev.Close() // vp.Up closes the device on failure, but be safe
+		return nil, err
+	}
+
+	tn := &tunnel{vt: vt, iface: name}
+	if err := tn.configureNetwork(spec, full); err != nil {
+		tn.Close()
+		return nil, fmt.Errorf("configure network: %w", err)
+	}
+	return tn, nil
+}
+
+// configureNetwork sets the utun address and, for a full tunnel, pins the server
+// endpoint to the physical gateway and overrides the default route with the
+// 0.0.0.0/1 + 128.0.0.0/1 split so connectivity to the server is preserved while
+// everything else flows through the tunnel.
+func (t *tunnel) configureNetwork(spec dialSpec, full bool) error {
+	if spec.address == "" {
+		return errors.New("profile/config has no tunnel address")
+	}
+	if err := sh("ifconfig", t.iface, "inet", spec.address, spec.address, "up"); err != nil {
+		return err
+	}
+
+	if !full {
+		for _, cidr := range spec.cfg.AllowedIPs {
+			_ = sh("route", "-n", "add", "-net", cidr, "-interface", t.iface)
+			t.undo = append(t.undo, "net "+cidr)
+		}
+		return nil
+	}
+
+	// Pin the server endpoint to the current physical gateway, so the encrypted
+	// WireGuard packets to it don't get routed back into the tunnel.
+	host, _, err := net.SplitHostPort(spec.cfg.Endpoint)
+	if err != nil {
+		host = spec.cfg.Endpoint
+	}
+	ip, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return fmt.Errorf("resolve endpoint %q: %w", host, err)
+	}
+	gw, err := defaultGateway()
+	if err != nil {
+		return err
+	}
+	if err := sh("route", "-n", "add", "-host", ip.String(), gw); err != nil {
+		return err
+	}
+	t.undo = append(t.undo, "host "+ip.String())
+
+	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		if err := sh("route", "-n", "add", "-net", half, "-interface", t.iface); err != nil {
+			return err
+		}
+		t.undo = append(t.undo, "net "+half)
+	}
 	return nil
 }
 
-// connect resolves the config, asks the caravel core to dial the tunnel, brings
-// up a utun, and routes traffic through it.
-//
-// NEXT STEP — make this real:
-//  1. If profilePath is set, parse the .pharos profile into config.
-//  2. github.com/PharosVPN/caravel/core (vp engine): build the protocol stack
-//     (amneziawg-go for AmneziaWG; xray-core for XRay) over a tun device.
-//  3. Create the macOS utun (amneziawg-go's tun.CreateTUN), configure the
-//     device via IpcSet with key/endpoint/allowed-ips/PSK + obfuscation, and
-//     install the default route through it (with the server endpoint pinned to
-//     the physical gateway). Restore on Close.
-func connect(_ context.Context, cfg config) (*conn, error) {
-	return nil, fmt.Errorf(
-		"engine not wired yet — implement the caravel core AmneziaWG engine "+
-			"(amneziawg-go) and call it here; see README (protocol=%s)", cfg.protocol)
+// Close tears down routes and the tunnel.
+func (t *tunnel) Close() error {
+	for _, spec := range t.undo {
+		parts := strings.Fields(spec)
+		_ = sh(append([]string{"route", "-n", "delete", "-" + parts[0]}, parts[1:]...)...)
+	}
+	if t.vt != nil {
+		t.vt.Close()
+	}
+	return nil
+}
+
+// defaultGateway returns the current IPv4 default gateway.
+func defaultGateway() (string, error) {
+	out, err := exec.Command("route", "-n", "get", "default").Output()
+	if err != nil {
+		return "", fmt.Errorf("read default route: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if gw, ok := strings.CutPrefix(line, "gateway:"); ok {
+			return strings.TrimSpace(gw), nil
+		}
+	}
+	return "", errors.New("no default gateway found")
+}
+
+func sh(args ...string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
