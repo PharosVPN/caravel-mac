@@ -19,6 +19,24 @@ struct NodeInfo: Identifiable, Equatable {
     var city: String? { Regions.locate(region)?.city }
 }
 
+// PathHop is one node in a device's egress chain (entry → [mid] → exit). The
+// client dials the entry; the controller routes the rest server-side.
+struct PathHop: Equatable {
+    var name: String
+    var region: String?
+    var role: String   // "entry", "mid", or "exit"
+    var ips: [String]
+
+    var coord: GeoCoord? { Regions.locate(region)?.coord }
+    var city: String? { Regions.locate(region)?.city }
+}
+
+// PathView is the ordered egress chain a path-bound profile carries.
+struct PathView: Equatable {
+    var name: String
+    var hops: [PathHop]
+}
+
 // ProfileInfo is what the UI shows about a stored .pharos. For plaintext (`none`)
 // profiles we can read the nodes for the map + IP list; for password/account we
 // only know the name + mode until the worker connects (the live endpoint then
@@ -27,6 +45,7 @@ struct ProfileInfo: Identifiable, Equatable {
     var name: String
     var enc: String
     var nodes: [NodeInfo]
+    var path: PathView?
 
     var id: String { name }
     var readable: Bool { enc == "none" }
@@ -57,16 +76,33 @@ enum Profiles {
         }
         let enc = env["enc"] as? String ?? "?"
         var nodes: [NodeInfo] = []
-        if enc == "none", let payload = env["payload"] as? [String: Any],
-           let raw = payload["nodes"] as? [[String: Any]] {
-            nodes = raw.map { node in
-                let ips = endpointIPs(node)
-                return NodeInfo(name: node["name"] as? String ?? "node",
-                                region: node["region"] as? String,
-                                ips: ips, activeIP: ips.first, proto: protoLabel(node))
+        var path: PathView?
+        if enc == "none", let payload = env["payload"] as? [String: Any] {
+            if let raw = payload["nodes"] as? [[String: Any]] {
+                nodes = raw.map { node in
+                    let ips = endpointIPs(node)
+                    return NodeInfo(name: node["name"] as? String ?? "node",
+                                    region: node["region"] as? String,
+                                    ips: ips, activeIP: ips.first, proto: protoLabel(node))
+                }
             }
+            path = parsePath(payload["path"])
         }
-        return ProfileInfo(name: name, enc: enc, nodes: nodes)
+        return ProfileInfo(name: name, enc: enc, nodes: nodes, path: path)
+    }
+
+    // parsePath reads the optional egress-chain display metadata (entry → [mid]
+    // → exit). Present only for a device bound to a multi-hop path.
+    private static func parsePath(_ raw: Any?) -> PathView? {
+        guard let pj = raw as? [String: Any],
+              let hopsj = pj["hops"] as? [[String: Any]], !hopsj.isEmpty else { return nil }
+        let hops = hopsj.map { h in
+            PathHop(name: h["name"] as? String ?? "node",
+                    region: h["region"] as? String,
+                    role: h["role"] as? String ?? "",
+                    ips: h["ips"] as? [String] ?? [])
+        }
+        return PathView(name: pj["name"] as? String ?? "path", hops: hops)
     }
 
     // protoLabel lists the node's protocol(s) for display. Only AmneziaWG is

@@ -102,6 +102,12 @@ struct ContentView: View {
             .padding(.top, 2)
         }
 
+        // egress path (entry → [mid] → exit) — only when the device is bound to a
+        // multi-hop path; a single-node profile shows just its node below.
+        if let path = tunnel.selectedInfo?.path {
+            routeCard(path)
+        }
+
         // nodes + IPs
         if let info = tunnel.selectedInfo {
             if info.nodes.isEmpty {
@@ -120,6 +126,45 @@ struct ContentView: View {
 
         if let err = tunnel.lastError {
             Text(err).font(.caption2).foregroundStyle(.red).lineLimit(3).padding(.top, 6)
+        }
+    }
+
+    private func routeCard(_ path: PathView) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.turn.up.right.diamond")
+                    .font(.caption).foregroundStyle(teal)
+                Text("Egress path · \(path.name)").font(.caption.weight(.semibold))
+            }
+            ForEach(Array(path.hops.enumerated()), id: \.offset) { i, h in
+                HStack(spacing: 6) {
+                    Image(systemName: roleIcon(h.role))
+                        .font(.caption2)
+                        .foregroundStyle(h.role == "exit" ? .green : teal)
+                    Text(h.city ?? h.name).font(.caption.weight(.medium))
+                    Text(h.role).font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    if let ip = h.ips.first {
+                        Text(ip).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                    }
+                }
+                if i < path.hops.count - 1 {
+                    Image(systemName: "arrow.down").font(.system(size: 8)).foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(teal.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.top, 10)
+    }
+
+    private func roleIcon(_ role: String) -> String {
+        switch role {
+        case "entry": return "arrow.right.to.line"
+        case "exit": return "arrow.up.right.circle.fill"
+        default: return "circle.dotted"
         }
     }
 

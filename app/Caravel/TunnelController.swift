@@ -106,21 +106,38 @@ final class TunnelController: ObservableObject {
         return GeoCoord(lat: 30, lon: max(-179, min(179, lon)))
     }
 
-    // mapPins: the "You" point + the selected profile's placeable nodes.
+    // mapPins: the "You" point + the selected profile's placeable nodes. When the
+    // profile carries an egress path, the pins are its ordered hops (entry →
+    // [mid] → exit, the exit marked as where traffic leaves); otherwise the
+    // entry node(s) the profile lists.
     var mapPins: [MapPin] {
-        let nodes = (selectedInfo?.nodes ?? []).compactMap { n -> MapPin? in
-            guard let c = n.coord else { return nil }
-            return MapPin(coord: c, label: n.city ?? n.name, sub: n.activeIP,
-                          active: n.activeIP != nil, kind: .node)
+        let nodes: [MapPin]
+        if let path = selectedInfo?.path {
+            nodes = path.hops.compactMap { h -> MapPin? in
+                guard let c = h.coord else { return nil }
+                return MapPin(coord: c, label: h.city ?? h.name, sub: h.role.capitalized,
+                              active: h.role == "exit", kind: .node)
+            }
+        } else {
+            nodes = (selectedInfo?.nodes ?? []).compactMap { n -> MapPin? in
+                guard let c = n.coord else { return nil }
+                return MapPin(coord: c, label: n.city ?? n.name, sub: n.activeIP,
+                              active: n.activeIP != nil, kind: .node)
+            }
         }
         guard !nodes.isEmpty else { return [] }
         return [MapPin(coord: clientCoord, label: "You", sub: nil, active: connected, kind: .client)] + nodes
     }
 
-    // mapArcs: the data-plane path (dashed) — You → the node chain. Control-plane
+    // mapArcs: the data-plane path (dashed) — You → the hop chain. Control-plane
     // (solid) arcs join here once the profile carries them.
     var mapArcs: [MapArc] {
-        let coords = (selectedInfo?.nodes ?? []).compactMap { $0.coord }
+        let coords: [GeoCoord]
+        if let path = selectedInfo?.path {
+            coords = path.hops.compactMap { $0.coord }
+        } else {
+            coords = (selectedInfo?.nodes ?? []).compactMap { $0.coord }
+        }
         guard !coords.isEmpty else { return [] }
         let chain = [clientCoord] + coords
         return (0..<(chain.count - 1)).map {
