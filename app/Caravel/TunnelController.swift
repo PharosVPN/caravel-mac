@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 The PharosVPN Authors
 
+import AppKit
 import Darwin
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum TunnelStatus: Equatable {
     case disconnected, connecting, connected, disconnecting
@@ -59,12 +61,60 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    // importProfile adds a .pharos file to the local store (the GUI counterpart of
+    // `caravel-mac import`). The other way to get a profile — fetching it from the
+    // controller via account login — is the account-sync flow (still to come).
+    func importProfile() {
+        let panel = NSOpenPanel()
+        panel.title = "Add a .pharos profile"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "pharos") ?? .data]
+        guard panel.runModal() == .OK, let src = panel.url else { return }
+        let dest = Profiles.dir.appendingPathComponent(src.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: Profiles.dir, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: src, to: dest)
+            reloadProfiles()
+            selectedProfile = dest.deletingPathExtension().lastPathComponent
+            lastError = nil
+        } catch {
+            lastError = "import failed: \(error.localizedDescription)"
+        }
+    }
+
     var selectedInfo: ProfileInfo? { profiles.first { $0.name == selectedProfile } }
-
-    // mapNodes are the nodes the map draws for the selected profile.
-    var mapNodes: [NodeInfo] { selectedInfo?.nodes ?? [] }
-
     var connected: Bool { status == .connected }
+
+    // clientCoord is an offline, no-permission approximation of "you": longitude
+    // from the current timezone offset (no geolocation, no network).
+    var clientCoord: GeoCoord {
+        let lon = Double(TimeZone.current.secondsFromGMT()) / 3600.0 * 15.0
+        return GeoCoord(lat: 30, lon: max(-179, min(179, lon)))
+    }
+
+    // mapPins: the "You" point + the selected profile's placeable nodes.
+    var mapPins: [MapPin] {
+        let nodes = (selectedInfo?.nodes ?? []).compactMap { n -> MapPin? in
+            guard let c = n.coord else { return nil }
+            return MapPin(coord: c, label: n.city ?? n.name, sub: n.activeIP,
+                          active: n.activeIP != nil, kind: .node)
+        }
+        guard !nodes.isEmpty else { return [] }
+        return [MapPin(coord: clientCoord, label: "You", sub: nil, active: connected, kind: .client)] + nodes
+    }
+
+    // mapArcs: the data-plane path (dashed) — You → the node chain. Control-plane
+    // (solid) arcs join here once the profile carries them.
+    var mapArcs: [MapArc] {
+        let coords = (selectedInfo?.nodes ?? []).compactMap { $0.coord }
+        guard !coords.isEmpty else { return [] }
+        let chain = [clientCoord] + coords
+        return (0..<(chain.count - 1)).map {
+            MapArc(points: greatCircle(chain[$0], chain[$0 + 1]), style: .dataPlane)
+        }
+    }
 
     func poll() {
         if let data = FileManager.default.contents(atPath: stateFile),

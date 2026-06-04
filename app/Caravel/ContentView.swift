@@ -13,7 +13,7 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             sidebar.frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
-            LandMap(nodes: tunnel.mapNodes, connected: connected)
+            LandMap(pins: tunnel.mapPins, arcs: tunnel.mapArcs, connected: connected)
                 .frame(minWidth: 480)
         }
         .preferredColorScheme(.dark)
@@ -30,8 +30,17 @@ struct ContentView: View {
             .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 12)
 
             // profiles
-            Text("PROFILES").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
+            HStack {
+                Text("PROFILES").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Button { tunnel.importProfile() } label: { Image(systemName: "plus.circle") }
+                    .buttonStyle(.plain).help("Add a .pharos file")
+                Button {
+                    tunnel.lastError = "Fetch-from-controller (account login) is coming — for now, add a .pharos file."
+                } label: { Image(systemName: "icloud.and.arrow.down") }
+                    .buttonStyle(.plain).help("Get from controller (account sync — coming)")
+            }
+            .padding(.horizontal, 16)
             List(selection: Binding(get: { tunnel.selectedProfile },
                                     set: { tunnel.selectedProfile = $0 ?? "" })) {
                 ForEach(tunnel.profiles) { p in
