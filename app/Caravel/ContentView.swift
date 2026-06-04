@@ -6,107 +6,133 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var tunnel: TunnelController
 
+    private let teal = Color(red: 0.31, green: 0.82, blue: 0.77)
     private var connected: Bool { tunnel.status == .connected }
     private var busy: Bool { tunnel.status == .connecting || tunnel.status == .disconnecting }
 
-    private var nodeName: String {
-        tunnel.selectedInfo?.nodeName ?? tunnel.state?.profile ?? tunnel.selectedProfile
-    }
-
     var body: some View {
-        ZStack(alignment: .bottom) {
-            PathMap(me: tunnel.myLocation, node: tunnel.nodeLocation,
-                    nodeName: nodeName, connected: connected)
-                .ignoresSafeArea()
-
-            controlCard
-                .frame(maxWidth: 560)
-                .padding(20)
+        HSplitView {
+            sidebar.frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
+            LandMap(nodes: tunnel.mapNodes, connected: connected)
+                .frame(minWidth: 480)
         }
         .preferredColorScheme(.dark)
+        .frame(minWidth: 880, minHeight: 580)
     }
 
-    private var controlCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // status + route
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(connected ? Color.green : (busy ? Color.yellow : Color.gray))
-                    .frame(width: 10, height: 10)
-                    .shadow(color: connected ? .green : .clear, radius: 5)
-                Text(tunnel.status.label).font(.headline)
-                Spacer()
-                if connected, let s = tunnel.state {
-                    Text(s.endpoint).font(.caption).foregroundStyle(.secondary)
-                }
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // brand
+            HStack(spacing: 8) {
+                Image(systemName: "shield.lefthalf.filled").foregroundStyle(teal)
+                Text("PharosVPN").font(.title3.weight(.bold))
             }
+            .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 12)
 
-            route
-
-            // controls
-            HStack(spacing: 12) {
-                Picker("", selection: $tunnel.selectedProfile) {
-                    if tunnel.profiles.isEmpty {
-                        Text("no profiles — import one with caravel-mac").tag("")
+            // profiles
+            Text("PROFILES").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+            List(selection: Binding(get: { tunnel.selectedProfile },
+                                    set: { tunnel.selectedProfile = $0 ?? "" })) {
+                ForEach(tunnel.profiles) { p in
+                    HStack {
+                        Image(systemName: "globe").font(.caption).foregroundStyle(teal.opacity(0.8))
+                        Text(p.name)
+                        Spacer()
+                        Text(p.enc).font(.caption2).foregroundStyle(.secondary)
                     }
-                    ForEach(tunnel.profiles) { p in
-                        Text("\(p.name)  (\(p.enc))").tag(p.name)
-                    }
+                    .tag(p.name)
                 }
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .disabled(connected || busy)
+            }
+            .listStyle(.sidebar)
+            .frame(maxHeight: 220)
 
-                Button(action: toggle) {
-                    Text(connected || tunnel.status == .disconnecting ? "Disconnect" : "Connect")
-                        .frame(width: 110)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(connected || tunnel.status == .disconnecting ? .red : .accentColor)
-                .disabled(busy || tunnel.selectedProfile.isEmpty)
+            if tunnel.profiles.isEmpty {
+                Text("No profiles. Import one:\n caravel-mac import <file.pharos>")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 16).padding(.vertical, 8)
             }
 
-            if let err = tunnel.lastError {
-                Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
-            }
+            Divider().padding(.vertical, 6)
+
+            detail.padding(.horizontal, 16)
+
+            Spacer(minLength: 8)
         }
-        .padding(18)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.08), lineWidth: 1))
-        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+        .background(Color(red: 0.07, green: 0.09, blue: 0.13))
     }
 
-    private var route: some View {
-        HStack(spacing: 10) {
-            endpoint(title: "You", place: tunnel.myLocation?.label ?? "locating…",
-                     symbol: "location.fill", color: .cyan)
-            Image(systemName: "arrow.right")
-                .foregroundStyle(connected ? .green : .secondary)
-            endpoint(title: nodeName.isEmpty ? "Exit" : nodeName,
-                     place: tunnel.nodeLocation?.label ?? (tunnel.selectedProfile.isEmpty ? "—" : "resolving…"),
-                     symbol: "shield.lefthalf.filled", color: connected ? .green : .gray)
-        }
-    }
-
-    private func endpoint(title: String, place: String, symbol: String, color: Color) -> some View {
+    @ViewBuilder private var detail: some View {
+        // status + action
         HStack(spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(color)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(place).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Circle().fill(connected ? .green : (busy ? .yellow : .gray)).frame(width: 9, height: 9)
+                .shadow(color: connected ? .green : .clear, radius: 4)
+            Text(tunnel.status.label).font(.subheadline.weight(.semibold))
+            Spacer()
+        }
+
+        Button(action: toggle) {
+            Text(connected || tunnel.status == .disconnecting ? "Disconnect" : "Connect")
+                .frame(maxWidth: .infinity).padding(.vertical, 5)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(connected || tunnel.status == .disconnecting ? .red : teal)
+        .disabled(busy || tunnel.selectedProfile.isEmpty)
+        .padding(.top, 6)
+
+        if connected, let s = tunnel.state {
+            Label(s.endpoint, systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+        }
+
+        // nodes + IPs
+        if let info = tunnel.selectedInfo {
+            if info.nodes.isEmpty {
+                Text(info.readable ? "no nodes in this profile"
+                                   : "encrypted profile — details appear once connected")
+                    .font(.caption).foregroundStyle(.secondary).padding(.top, 10)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(info.nodes) { node in nodeCard(node) }
+                    }
+                }
+                .padding(.top, 10)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+
+        if let err = tunnel.lastError {
+            Text(err).font(.caption2).foregroundStyle(.red).lineLimit(3).padding(.top, 6)
+        }
+    }
+
+    private func nodeCard(_ node: NodeInfo) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "server.rack").font(.caption).foregroundStyle(teal)
+                Text(node.name).font(.subheadline.weight(.semibold))
+                if let city = node.city {
+                    Text("· \(city)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            ForEach(node.ips, id: \.self) { ip in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(ip == node.activeIP ? teal : Color.gray.opacity(0.5))
+                        .frame(width: 6, height: 6)
+                    Text(ip).font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(ip == node.activeIP ? .primary : .secondary)
+                    if ip == node.activeIP {
+                        Text("active").font(.caption2).foregroundStyle(teal)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func toggle() {
-        if connected || tunnel.status == .disconnecting {
-            tunnel.disconnect()
-        } else {
-            tunnel.connect()
-        }
+        if connected || tunnel.status == .disconnecting { tunnel.disconnect() } else { tunnel.connect() }
     }
 }

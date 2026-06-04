@@ -29,28 +29,24 @@ struct TunnelState: Codable {
 }
 
 // TunnelController is the app's view-model: it lists stored profiles, polls the
-// worker's state file for live status, resolves the map pins, and connects /
-// disconnects by driving the bundled caravel-mac CLI as root through the system
-// authorization prompt. No privileged daemon — the root worker is caravel-mac.
+// worker's state file for live status, and connects / disconnects. It is fully
+// offline — no network, no geolocation. (Connect/disconnect currently authorize
+// each time via the system prompt; a once-installed privileged helper to make
+// that one-time is the next step.)
 @MainActor
 final class TunnelController: ObservableObject {
     @Published var status: TunnelStatus = .disconnected
     @Published var state: TunnelState?
     @Published var profiles: [ProfileInfo] = []
-    @Published var selectedProfile: String = "" { didSet { Task { await updateNodeLocation() } } }
-    @Published var myLocation: GeoPoint?
-    @Published var nodeLocation: GeoPoint?
+    @Published var selectedProfile: String = ""
     @Published var lastError: String?
 
     private var timer: Timer?
-    private var resolvedNodeIP: String = ""
     private let stateFile = "/Library/Application Support/PharosVPN/state.json"
 
     func start() {
         reloadProfiles()
         poll()
-        Task { myLocation = await Geo.myLocation() }
-        Task { await updateNodeLocation() }
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -58,13 +54,19 @@ final class TunnelController: ObservableObject {
 
     func reloadProfiles() {
         profiles = Profiles.list()
-        if selectedProfile.isEmpty { selectedProfile = profiles.first?.name ?? "" }
+        if selectedProfile.isEmpty || !profiles.contains(where: { $0.name == selectedProfile }) {
+            selectedProfile = profiles.first?.name ?? ""
+        }
     }
 
     var selectedInfo: ProfileInfo? { profiles.first { $0.name == selectedProfile } }
 
+    // mapNodes are the nodes the map draws for the selected profile.
+    var mapNodes: [NodeInfo] { selectedInfo?.nodes ?? [] }
+
+    var connected: Bool { status == .connected }
+
     func poll() {
-        let prev = state
         if let data = FileManager.default.contents(atPath: stateFile),
            let s = try? JSONDecoder().decode(TunnelState.self, from: data),
            processAlive(s.pid) {
@@ -74,25 +76,6 @@ final class TunnelController: ObservableObject {
             state = nil
             if status == .connected || status == .disconnecting { status = .disconnected }
         }
-        if state?.endpoint != prev?.endpoint { Task { await updateNodeLocation() } }
-    }
-
-    // updateNodeLocation resolves the node pin: the live endpoint when connected,
-    // else the selected (plaintext) profile's previewable endpoint.
-    func updateNodeLocation() async {
-        let ip: String
-        if let ep = state?.endpoint, !ep.isEmpty {
-            ip = Geo.hostOf(ep)
-        } else if let preview = selectedInfo?.endpointIP {
-            ip = preview
-        } else {
-            nodeLocation = nil
-            resolvedNodeIP = ""
-            return
-        }
-        if ip == resolvedNodeIP { return }
-        resolvedNodeIP = ip
-        nodeLocation = await Geo.locate(ip)
     }
 
     func connect() {
@@ -118,8 +101,6 @@ final class TunnelController: ObservableObject {
         }
     }
 
-    // caravelBin prefers the worker bundled in the .app (Contents/Resources),
-    // then a dev install.
     private func caravelBin() -> String {
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("caravel-mac").path,
            FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
