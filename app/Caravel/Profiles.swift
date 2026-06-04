@@ -12,6 +12,7 @@ struct NodeInfo: Identifiable, Equatable {
     var region: String?
     var ips: [String]
     var activeIP: String?
+    var proto: String?
 
     var id: String { name + "|" + (region ?? "") }
     var coord: GeoCoord? { Regions.locate(region)?.coord }
@@ -62,10 +63,24 @@ enum Profiles {
                 let ips = endpointIPs(node)
                 return NodeInfo(name: node["name"] as? String ?? "node",
                                 region: node["region"] as? String,
-                                ips: ips, activeIP: ips.first)
+                                ips: ips, activeIP: ips.first, proto: protoLabel(node))
             }
         }
         return ProfileInfo(name: name, enc: enc, nodes: nodes)
+    }
+
+    // protoLabel lists the node's protocol(s) for display. Only AmneziaWG is
+    // implemented today; XRay shows here once the engine supports it.
+    private static func protoLabel(_ node: [String: Any]) -> String? {
+        guard let protos = node["protocols"] as? [[String: Any]] else { return nil }
+        let names = protos.compactMap { $0["type"] as? String }.map { t -> String in
+            switch t {
+            case "amneziawg": return "AmneziaWG"
+            case "xray": return "XRay"
+            default: return t
+            }
+        }
+        return names.isEmpty ? nil : names.joined(separator: ", ")
     }
 
     // endpointIPs returns a node's endpoint pool IPs (the multiple IPs per node,

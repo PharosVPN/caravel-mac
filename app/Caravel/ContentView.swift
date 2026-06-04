@@ -92,6 +92,14 @@ struct ContentView: View {
         if connected, let s = tunnel.state {
             Label(s.endpoint, systemImage: "point.3.connected.trianglepath.dotted")
                 .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+            HStack(spacing: 14) {
+                Label(humanBytes(s.rx ?? 0), systemImage: "arrow.down")
+                    .foregroundStyle(.green)
+                Label(humanBytes(s.tx ?? 0), systemImage: "arrow.up")
+                    .foregroundStyle(teal)
+            }
+            .font(.system(.caption, design: .monospaced))
+            .padding(.top, 2)
         }
 
         // nodes + IPs
@@ -122,6 +130,14 @@ struct ContentView: View {
                 Text(node.name).font(.subheadline.weight(.semibold))
                 if let city = node.city {
                     Text("· \(city)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let proto = node.proto {
+                    Text(proto)
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(teal.opacity(0.15), in: Capsule())
+                        .foregroundStyle(teal)
                 }
             }
             ForEach(node.ips, id: \.self) { ip in

@@ -28,6 +28,18 @@ struct TunnelState: Codable {
     var endpoint: String
     var pid: Int
     var since: String
+    var rx: Int64?
+    var tx: Int64?
+}
+
+// humanBytes formats a byte count compactly (e.g. "1.2 MB").
+func humanBytes(_ n: Int64) -> String {
+    let u: Double = 1024
+    if n < 1024 { return "\(n) B" }
+    var x = Double(n), i = 0
+    let units = ["KB", "MB", "GB", "TB", "PB"]
+    repeat { x /= u; i += 1 } while x >= u && i < units.count
+    return String(format: "%.1f %@", x, units[i - 1])
 }
 
 // TunnelController is the app's view-model: it lists stored profiles, polls the

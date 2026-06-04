@@ -257,14 +257,29 @@ func cmdConnect(args []string) error {
 
 	// Record the running tunnel so the menu-bar UI / `caravel-mac status` can see
 	// it and stop it; clear it on the way out.
-	_ = writeState(State{
-		Profile:  spec.label,
-		Iface:    tn.iface,
-		Endpoint: spec.cfg.Endpoint,
-		PID:      os.Getpid(),
-		Since:    time.Now(),
-	})
+	since := time.Now()
+	writeTunnelState := func() {
+		rx, tx := tn.stats()
+		_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.cfg.Endpoint,
+			PID: os.Getpid(), Since: since, RX: rx, TX: tx})
+	}
+	writeTunnelState()
 	defer clearState()
+
+	// Refresh RX/TX in the state file while connected (so `status` / the UI show
+	// live throughput).
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				writeTunnelState()
+			}
+		}
+	}()
 
 	fmt.Printf("caravel-mac: tunnel up on %s → %s (%s, full-tunnel=%v). Ctrl-C to disconnect.\n",
 		tn.iface, spec.cfg.Endpoint, spec.label, *fullTunnel)
@@ -488,6 +503,15 @@ func (t *tunnel) Close() error {
 		t.vt.Close()
 	}
 	return nil
+}
+
+// stats returns the tunnel's cumulative RX/TX bytes (0 if unavailable).
+func (t *tunnel) stats() (rx, tx int64) {
+	if t.vt == nil {
+		return 0, 0
+	}
+	rx, tx, _ = t.vt.Stats()
+	return rx, tx
 }
 
 // defaultGateway returns the current IPv4 default gateway.

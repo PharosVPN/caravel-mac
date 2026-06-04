@@ -42,6 +42,8 @@ type State struct {
 	Endpoint string    `json:"endpoint"`
 	PID      int       `json:"pid"`
 	Since    time.Time `json:"since"`
+	RX       int64     `json:"rx"` // cumulative received bytes
+	TX       int64     `json:"tx"` // cumulative transmitted bytes
 }
 
 // writeState records the running tunnel at the shared path (world-readable so a
@@ -95,7 +97,22 @@ func cmdStatus(_ []string) error {
 		fmt.Println("disconnected")
 		return nil
 	}
-	fmt.Printf("connected — profile %q on %s → %s (since %s)\n",
-		s.Profile, s.Iface, s.Endpoint, s.Since.Format(time.Kitchen))
+	fmt.Printf("connected — profile %q on %s → %s (since %s)  ↓%s ↑%s\n",
+		s.Profile, s.Iface, s.Endpoint, s.Since.Format(time.Kitchen),
+		humanBytes(s.RX), humanBytes(s.TX))
 	return nil
+}
+
+// humanBytes formats a byte count compactly (e.g. 1.2 MB).
+func humanBytes(n int64) string {
+	const u = 1024
+	if n < u {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(u), 0
+	for x := n / u; x >= u; x /= u {
+		div *= u
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }

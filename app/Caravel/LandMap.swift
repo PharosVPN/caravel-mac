@@ -152,16 +152,18 @@ struct LandMap: View {
             ctx.stroke(path, with: .color(color.opacity(0.85)),
                        style: StrokeStyle(lineWidth: 2, lineCap: .round,
                                           dash: arc.style == .dataPlane ? [4, 6] : []))
-            // flow dots
-            let lengths = cumulativeLengths(screen)
-            let total = lengths.last ?? 0
-            if total > 1 {
-                let dots = 3
-                for k in 0..<dots {
-                    let frac = ((t * 0.18) + Double(k) / Double(dots)).truncatingRemainder(dividingBy: 1)
-                    let p = pointAt(frac, screen, lengths, total)
-                    ctx.fill(Path(ellipseIn: CGRect(x: p.x - 2.4, y: p.y - 2.4, width: 4.8, height: 4.8)),
-                             with: .color(color))
+            // flowing traffic — only while connected (a static dashed arc otherwise)
+            if connected {
+                let lengths = cumulativeLengths(screen)
+                let total = lengths.last ?? 0
+                if total > 1 {
+                    let dots = 3
+                    for k in 0..<dots {
+                        let frac = ((t * 0.18) + Double(k) / Double(dots)).truncatingRemainder(dividingBy: 1)
+                        let p = pointAt(frac, screen, lengths, total)
+                        ctx.fill(Path(ellipseIn: CGRect(x: p.x - 2.4, y: p.y - 2.4, width: 4.8, height: 4.8)),
+                                 with: .color(color))
+                    }
                 }
             }
         }
@@ -181,8 +183,8 @@ struct LandMap: View {
         case .relay: color = LandMap.control
         case .node: color = connected ? .green : (pin.active ? LandMap.teal : .gray)
         }
-        // pulsing ring (client + connected nodes)
-        if pin.kind == .client || (pin.kind == .node && (connected || pin.active)) {
+        // pulsing ring — only while connected (the animation starts on connect)
+        if connected {
             let phase = (t * 0.8).truncatingRemainder(dividingBy: 1)
             let r = 8 + CGFloat(phase) * 18
             ctx.stroke(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)),

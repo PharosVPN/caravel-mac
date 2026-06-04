@@ -46,6 +46,7 @@ type daemon struct {
 	label    string
 	endpoint string
 	iface    string
+	since    time.Time
 }
 
 // cmdDaemon runs the root helper: it listens on the control socket and manages
@@ -75,6 +76,7 @@ func cmdDaemon(_ []string) error {
 		os.Exit(0)
 	}()
 
+	go d.statsLoop()
 	fmt.Println("caravel-mac daemon: ready on", controlSocket)
 	for {
 		conn, err := ln.Accept()
@@ -139,10 +141,27 @@ func (d *daemon) connect(profilePath, password string, full bool) error {
 	if err != nil {
 		return err
 	}
-	d.tn, d.label, d.endpoint, d.iface = tn, spec.label, spec.cfg.Endpoint, tn.iface
+	d.tn, d.label, d.endpoint, d.iface, d.since = tn, spec.label, spec.cfg.Endpoint, tn.iface, time.Now()
+	rx, tx := tn.stats()
 	_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.cfg.Endpoint,
-		PID: os.Getpid(), Since: time.Now()})
+		PID: os.Getpid(), Since: d.since, RX: rx, TX: tx})
 	return nil
+}
+
+// statsLoop refreshes RX/TX in the state file while a tunnel is up, so the app /
+// `status` show live throughput.
+func (d *daemon) statsLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		d.mu.Lock()
+		if d.tn != nil {
+			rx, tx := d.tn.stats()
+			_ = writeState(State{Profile: d.label, Iface: d.iface, Endpoint: d.endpoint,
+				PID: os.Getpid(), Since: d.since, RX: rx, TX: tx})
+		}
+		d.mu.Unlock()
+	}
 }
 
 func (d *daemon) disconnect() {
