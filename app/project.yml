@@ -1,0 +1,35 @@
+# XcodeGen project spec for the PharosVPN macOS app (Caravel).
+# Generate the .xcodeproj with:  cd app && xcodegen   (brew install xcodegen)
+# Build + sign + DMG with:        ./package.sh
+name: Caravel
+options:
+  bundleIdPrefix: org.pharosvpn
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+targets:
+  Caravel:
+    type: application
+    platform: macOS
+    sources:
+      - Caravel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.pharosvpn.caravel
+        PRODUCT_NAME: PharosVPN
+        SWIFT_VERSION: "5.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        # Personal build: hardened runtime OFF so the app can launch the bundled
+        # caravel-mac worker; no app sandbox (the worker needs root via the auth
+        # prompt, and we read a system state file). package.sh re-signs with the
+        # hardened runtime for the distributable DMG.
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_IDENTITY: "-"
+    info:
+      path: Caravel/Info.plist
+      properties:
+        LSMinimumSystemVersion: "14.0"
+        LSApplicationCategoryType: public.app-category.utilities
+        CFBundleDisplayName: PharosVPN
+        # A plain window app (no Dock-only/agent); shows in the Dock + menu bar.
+        LSUIElement: false

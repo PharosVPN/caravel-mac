@@ -5,3 +5,10 @@
 
 # Live-test artifacts (a generated profile holds a client private key)
 /livetest/
+
+# macOS app: XcodeGen-generated project, build output, bundled worker, DMGs
+/app/Caravel.xcodeproj/
+/app/build/
+/build/
+/app/Caravel/Resources/caravel-mac
+*.dmg
