@@ -172,7 +172,17 @@ final class TunnelController: ObservableObject {
                     return
                 }
             }
-            let err = runCtl(["connect", path])
+            var err = runCtl(["connect", path])
+            // The daemon may be down (e.g. a flaky prior install left it
+            // unregistered) — (re)install the helper, which (re)bootstraps it, and
+            // retry once.
+            if let e = err, e.contains("not reachable") || e.contains("refused") {
+                if let ierr = ensureHelper() {
+                    err = ierr
+                } else {
+                    err = runCtl(["connect", path])
+                }
+            }
             await MainActor.run { [weak self] in
                 if let err { self?.lastError = err; self?.status = .disconnected }
             }
