@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 The PharosVPN Authors
 
+import AppKit
 import SwiftUI
 
 // ───────── map model ─────────
@@ -94,20 +95,106 @@ struct LandMap: View {
     static let control = Color(red: 0.62, green: 0.55, blue: 0.95)
     private let geo = WorldGeometry.shared
 
+    // Pan/zoom: committed in @State, with the in-progress gesture in @GestureState.
+    @State private var zoom: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @GestureState private var pinch: CGFloat = 1
+    @GestureState private var dragPan: CGSize = .zero
+    private let minZoom: CGFloat = 1
+    private let maxZoom: CGFloat = 12
+
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            TimelineView(.animation) { timeline in
-                Canvas { ctx, size in
-                    draw(ctx, size, t: timeline.date.timeIntervalSinceReferenceDate)
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
+                TimelineView(.animation) { timeline in
+                    Canvas { ctx, csize in
+                        draw(ctx, csize, t: timeline.date.timeIntervalSinceReferenceDate)
+                    }
                 }
+                .contentShape(Rectangle())
+                .background(ScrollZoomCatcher { dy in scrollZoom(dy, size) })
+                .gesture(
+                    DragGesture()
+                        .updating($dragPan) { v, s, _ in s = v.translation }
+                        .onEnded { v in
+                            pan = clampPan(CGSize(width: pan.width + v.translation.width,
+                                                  height: pan.height + v.translation.height), size, zoom)
+                        }
+                )
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .updating($pinch) { v, s, _ in s = v }
+                        .onEnded { v in
+                            zoom = min(maxZoom, max(minZoom, zoom * v))
+                            pan = clampPan(pan, size, zoom)
+                        }
+                )
+
+                Legend().padding(14)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                zoomControls(size)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(14)
             }
-            Legend().padding(14)
         }
         .background(Color(red: 0.03, green: 0.04, blue: 0.07))
+        .clipped()
+    }
+
+    private func zoomControls(_ size: CGSize) -> some View {
+        VStack(spacing: 0) {
+            zoomButton("plus") { setZoom(zoom * 1.6, size) }
+            Divider().frame(width: 20).opacity(0.4)
+            zoomButton("minus") { setZoom(zoom / 1.6, size) }
+            Divider().frame(width: 20).opacity(0.4)
+            zoomButton("arrow.up.left.and.arrow.down.right") {
+                withAnimation(.easeOut(duration: 0.22)) { zoom = 1; pan = .zero }
+            }
+        }
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(.white.opacity(0.08), lineWidth: 1))
+        .opacity(0.92)
+    }
+
+    private func zoomButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 30).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func setZoom(_ z: CGFloat, _ size: CGSize) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            zoom = min(maxZoom, max(minZoom, z))
+            pan = clampPan(pan, size, zoom)
+        }
+    }
+
+    // clampPan keeps the world from being dragged off the view.
+    private func clampPan(_ p: CGSize, _ size: CGSize, _ z: CGFloat) -> CGSize {
+        let mx = max(0, (z - 1) * size.width * 0.6)
+        let my = max(0, (z - 1) * size.height * 0.6)
+        return CGSize(width: min(mx, max(-mx, p.width)), height: min(my, max(-my, p.height)))
+    }
+
+    private func scrollZoom(_ dy: CGFloat, _ size: CGSize) {
+        let factor = 1 + max(-0.4, min(0.4, dy * 0.01))
+        zoom = min(maxZoom, max(minZoom, zoom * factor))
+        pan = clampPan(pan, size, zoom)
     }
 
     private func draw(_ ctx: GraphicsContext, _ size: CGSize, t: Double) {
-        let fit = geo.fit(size)
+        // Base world fit, then apply the live zoom (pinch) + pan (drag) about the
+        // view centre.
+        let base = geo.fit(size)
+        let z = min(maxZoom, max(minZoom, zoom * pinch))
+        let p = clampPan(CGSize(width: pan.width + dragPan.width, height: pan.height + dragPan.height), size, z)
+        let cx = size.width / 2, cy = size.height / 2
+        let fit = (s: base.s * z,
+                   tx: cx + (base.tx - cx) * z + p.width,
+                   ty: cy + (base.ty - cy) * z + p.height)
 
         // ocean
         ctx.fill(Path(CGRect(origin: .zero, size: size)),
@@ -310,4 +397,41 @@ func greatCircle(_ a: GeoCoord, _ b: GeoCoord, steps: Int = 64) -> [GeoCoord] {
         out.append(GeoCoord(lat: atan2(z, sqrt(x * x + y * y)) * 180 / .pi, lon: atan2(y, x) * 180 / .pi))
     }
     return out
+}
+
+// ScrollZoomCatcher reports scroll-wheel / two-finger-scroll over the map as a
+// zoom delta. It uses a window-scoped local event monitor (not a hit-tested view),
+// so it never blocks the map's click-drag or pinch gestures and only acts while
+// the pointer is over the map bounds.
+struct ScrollZoomCatcher: NSViewRepresentable {
+    var onScroll: (CGFloat) -> Void
+    func makeNSView(context: Context) -> NSView {
+        let v = Catcher()
+        v.onScroll = onScroll
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? Catcher)?.onScroll = onScroll
+    }
+    final class Catcher: NSView {
+        var onScroll: ((CGFloat) -> Void)?
+        private var monitor: Any?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+                return
+            }
+            if monitor != nil { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] e in
+                guard let self, let win = self.window, e.window === win else { return e }
+                let pt = self.convert(e.locationInWindow, from: nil)
+                guard self.bounds.contains(pt) else { return e }
+                let dy = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY : e.deltaY
+                self.onScroll?(dy)
+                return nil
+            }
+        }
+        deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
 }
