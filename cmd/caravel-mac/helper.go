@@ -46,10 +46,22 @@ func cmdInstallHelper(_ []string) error {
 	if err := os.WriteFile(daemonPlist, []byte(plist), 0o644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
-	_ = exec.Command("launchctl", "unload", daemonPlist).Run() // reload if already present
-	if out, err := exec.Command("launchctl", "load", "-w", daemonPlist).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load: %w (%s)", err, strings.TrimSpace(string(out)))
+	// Register with launchd using the modern bootstrap API. The legacy
+	// load/unload flakes on REINSTALL (macOS 13+): a second `load` after an
+	// `unload` can no-op and leave the daemon dead — which is exactly what broke
+	// connect/stats after an app update (first install worked, reinstall didn't).
+	label := "system/" + daemonLabel
+	_ = exec.Command("launchctl", "bootout", label).Run()      // clear modern reg (ignore "not found")
+	_ = exec.Command("launchctl", "unload", daemonPlist).Run() // clear any legacy reg
+	if out, err := exec.Command("launchctl", "bootstrap", "system", daemonPlist).CombinedOutput(); err != nil {
+		// Fall back to the legacy loader on systems without bootstrap.
+		if out2, err2 := exec.Command("launchctl", "load", "-w", daemonPlist).CombinedOutput(); err2 != nil {
+			return fmt.Errorf("launchctl bootstrap: %w (%s); load fallback: %v (%s)",
+				err, strings.TrimSpace(string(out)), err2, strings.TrimSpace(string(out2)))
+		}
 	}
+	_ = exec.Command("launchctl", "enable", label).Run()
+	_ = exec.Command("launchctl", "kickstart", "-k", label).Run() // (re)start now, don't wait for relaunch
 	fmt.Println("caravel-mac helper installed and running — connect/disconnect no longer prompt")
 	return nil
 }
@@ -59,6 +71,7 @@ func cmdUninstallHelper(_ []string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("uninstall-helper must run as root")
 	}
+	_ = exec.Command("launchctl", "bootout", "system/"+daemonLabel).Run()
 	_ = exec.Command("launchctl", "unload", daemonPlist).Run()
 	_ = os.Remove(daemonPlist)
 	_ = os.Remove(helperBin)
