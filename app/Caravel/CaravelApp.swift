@@ -11,10 +11,10 @@ struct CaravelApp: App {
         WindowGroup("PharosVPN") {
             ContentView()
                 .environmentObject(tunnel)
-                .frame(minWidth: 820, minHeight: 560)
                 .onAppear { tunnel.start() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+        .defaultSize(width: 1320, height: 860)
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 The PharosVPN Authors
 
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -12,22 +13,27 @@ struct ContentView: View {
 
     var body: some View {
         HSplitView {
-            sidebar.frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
+            sidebar.frame(minWidth: 300, idealWidth: 340, maxWidth: 440)
             LandMap(pins: tunnel.mapPins, arcs: tunnel.mapArcs, connected: connected)
-                .frame(minWidth: 480)
+                .frame(minWidth: 640)
         }
         .preferredColorScheme(.dark)
-        .frame(minWidth: 880, minHeight: 580)
+        .frame(minWidth: 1040, idealWidth: 1320, minHeight: 720, idealHeight: 860)
+        .background(WindowAccessor())
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // brand
+            // brand (double-click to maximize — the title bar is hidden)
             HStack(spacing: 8) {
                 Image(systemName: "shield.lefthalf.filled").foregroundStyle(teal)
                 Text("PharosVPN").font(.title3.weight(.bold))
+                Spacer()
             }
             .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 12)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { zoomWindow() }
+            .help("Double-click to maximize")
 
             // profiles
             HStack {
@@ -205,4 +211,22 @@ struct ContentView: View {
     private func toggle() {
         if connected || tunnel.status == .disconnecting { tunnel.disconnect() } else { tunnel.connect() }
     }
+
+    // zoomWindow toggles the window between its standard size and filling the
+    // screen — the green-button / double-click-title-bar behavior.
+    private func zoomWindow() {
+        (NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first)?.zoom(nil)
+    }
+}
+
+// WindowAccessor reaches the hosting NSWindow to make it grab-anywhere draggable
+// (the title bar is hidden), so the header double-click-to-maximize and window
+// dragging both feel natural without a visible title bar.
+struct WindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in v?.window?.isMovableByWindowBackground = true }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
