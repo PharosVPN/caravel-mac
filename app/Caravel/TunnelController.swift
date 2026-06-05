@@ -166,22 +166,22 @@ final class TunnelController: ObservableObject {
         lastError = nil
         let path = Profiles.path(selectedProfile).path
         Task.detached {
+            var prompted = false
             if !helperInstalled() || helperIsStale() {
                 if let err = ensureHelper() {
                     await MainActor.run { [weak self] in self?.lastError = err; self?.status = .disconnected }
                     return
                 }
+                prompted = true
             }
-            var err = runCtl(["connect", path])
-            // The daemon may be down (e.g. a flaky prior install left it
-            // unregistered) — (re)install the helper, which (re)bootstraps it, and
-            // retry once.
-            if let e = err, e.contains("not reachable") || e.contains("refused") {
-                if let ierr = ensureHelper() {
-                    err = ierr
-                } else {
-                    err = runCtl(["connect", path])
-                }
+            // A just-(re)installed daemon takes a moment to bind its control socket;
+            // poll the connect rather than failing on the first try (the bug that
+            // needed an app restart).
+            var err = runCtlWaiting(["connect", path])
+            // If it is still unreachable AND we have not already prompted, the
+            // daemon was registered but down — (re)bootstrap it once, then retry.
+            if let e = err, (e.contains("not reachable") || e.contains("refused")), !prompted {
+                if let ierr = ensureHelper() { err = ierr } else { err = runCtlWaiting(["connect", path]) }
             }
             await MainActor.run { [weak self] in
                 if let err { self?.lastError = err; self?.status = .disconnected }
@@ -233,6 +233,21 @@ func helperIsStale() -> Bool {
 // message, or nil on success.
 func ensureHelper() -> String? {
     runAdmin("'\(caravelBinPath())' install-helper")
+}
+
+// runCtlWaiting drives the daemon but briefly retries while the control socket is
+// not yet up — a just-bootstrapped daemon needs a moment to bind, so the first
+// connect after an install would otherwise fail until an app restart. Retrying a
+// `connect` that never reached the daemon is safe (no tunnel was brought up).
+func runCtlWaiting(_ args: [String]) -> String? {
+    var err = runCtl(args)
+    var tries = 0
+    while let e = err, e.contains("not reachable") || e.contains("refused"), tries < 12 {
+        usleep(400_000) // 0.4s, up to ~5s
+        err = runCtl(args)
+        tries += 1
+    }
+    return err
 }
 
 // runCtl drives the daemon over its control socket via `caravel-mac ctl …` — no
