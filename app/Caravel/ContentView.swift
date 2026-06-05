@@ -10,6 +10,7 @@ struct ContentView: View {
     private let teal = Color(red: 0.31, green: 0.82, blue: 0.77)
     private var connected: Bool { tunnel.status == .connected }
     private var busy: Bool { tunnel.status == .connecting || tunnel.status == .disconnecting }
+    @State private var pendingDelete: String?
 
     var body: some View {
         HSplitView {
@@ -50,16 +51,44 @@ struct ContentView: View {
                                     set: { tunnel.selectedProfile = $0 ?? "" })) {
                 ForEach(tunnel.profiles) { p in
                     HStack {
-                        Image(systemName: "globe").font(.caption).foregroundStyle(teal.opacity(0.8))
+                        Image(systemName: p.cloudSynced ? "cloud" : "globe")
+                            .font(.caption).foregroundStyle(teal.opacity(0.8))
                         Text(p.name)
+                            .strikethrough(p.disabled)
+                            .foregroundStyle(p.disabled ? Color.secondary : Color.primary)
                         Spacer()
-                        Text(p.enc).font(.caption2).foregroundStyle(.secondary)
+                        Text(p.disabled ? "off" : p.enc).font(.caption2).foregroundStyle(.secondary)
                     }
                     .tag(p.name)
+                    .contextMenu {
+                        if p.cloudSynced {
+                            Button(p.disabled ? "Enable" : "Disable",
+                                   systemImage: p.disabled ? "play.circle" : "pause.circle") {
+                                tunnel.setProfileDisabled(p.name, !p.disabled)
+                            }
+                            Text("Cloud-synced — can't be deleted, only disabled")
+                        } else {
+                            Button("Delete…", systemImage: "trash", role: .destructive) {
+                                pendingDelete = p.name
+                            }
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
             .frame(maxHeight: 220)
+            .confirmationDialog("Delete “\(pendingDelete ?? "")”?",
+                                isPresented: Binding(get: { pendingDelete != nil },
+                                                     set: { if !$0 { pendingDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete profile", role: .destructive) {
+                    if let n = pendingDelete { tunnel.deleteProfile(n) }
+                    pendingDelete = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: {
+                Text("Removes this imported profile from this Mac. You can re-import it from its .pharos file.")
+            }
 
             if tunnel.profiles.isEmpty {
                 Text("No profiles. Import one:\n caravel-mac import <file.pharos>")
@@ -91,7 +120,7 @@ struct ContentView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(connected || tunnel.status == .disconnecting ? .red : teal)
-        .disabled(busy || tunnel.selectedProfile.isEmpty)
+        .disabled(busy || tunnel.selectedProfile.isEmpty || (tunnel.selectedInfo?.disabled ?? false))
         .padding(.top, 6)
 
         if connected, let s = tunnel.state {
