@@ -11,6 +11,10 @@ struct ContentView: View {
     private var connected: Bool { tunnel.status == .connected }
     private var busy: Bool { tunnel.status == .connecting || tunnel.status == .disconnecting }
     @State private var pendingDelete: String?
+    @State private var syncSheet = false
+    @State private var syncBundle: URL?
+    @State private var syncEmail = ""
+    @State private var syncPassword = ""
 
     var body: some View {
         HSplitView {
@@ -42,9 +46,15 @@ struct ContentView: View {
                 Button { tunnel.importProfile() } label: { Image(systemName: "plus.circle") }
                     .buttonStyle(.plain).help("Add a .pharos file")
                 Button {
-                    tunnel.lastError = "Fetch-from-controller (account login) is coming — for now, add a .pharos file."
+                    if let url = tunnel.pickDeviceBundle() {
+                        syncBundle = url
+                        syncEmail = ""
+                        syncPassword = ""
+                        syncSheet = true
+                    }
                 } label: { Image(systemName: "icloud.and.arrow.down") }
-                    .buttonStyle(.plain).help("Get from controller (account sync — coming)")
+                    .buttonStyle(.plain).help("Get from controller (account sync)")
+                    .disabled(busy)
             }
             .padding(.horizontal, 16)
             List(selection: Binding(get: { tunnel.selectedProfile },
@@ -89,6 +99,7 @@ struct ContentView: View {
             } message: {
                 Text("Removes this imported profile from this Mac. You can re-import it from its .pharos file.")
             }
+            .sheet(isPresented: $syncSheet) { syncSheetView }
 
             if tunnel.profiles.isEmpty {
                 Text("No profiles. Import one:\n caravel-mac import <file.pharos>")
@@ -103,6 +114,38 @@ struct ContentView: View {
             Spacer(minLength: 8)
         }
         .background(Color(red: 0.07, green: 0.09, blue: 0.13))
+    }
+
+    // syncSheetView collects the account login for fetching a profile from the
+    // controller. The passphrase is piped to the worker over stdin, never argv.
+    private var syncSheetView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Sync from controller").font(.headline)
+            Text(syncBundle?.lastPathComponent ?? "")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            Text("Sign in with your account passphrase. Your profile is decrypted on this Mac — the controller only stores ciphertext.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            TextField("Account email (optional if in the bundle)", text: $syncEmail)
+                .textFieldStyle(.roundedBorder).disableAutocorrection(true)
+            SecureField("Account passphrase", text: $syncPassword)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Spacer()
+                Button("Cancel") { syncSheet = false }.keyboardShortcut(.cancelAction)
+                Button("Sync") {
+                    if let b = syncBundle {
+                        tunnel.syncFromController(
+                            bundle: b,
+                            email: syncEmail.trimmingCharacters(in: .whitespaces),
+                            password: syncPassword)
+                    }
+                    syncSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(syncPassword.isEmpty || syncBundle == nil)
+            }
+        }
+        .padding(20).frame(width: 400)
     }
 
     @ViewBuilder private var detail: some View {
