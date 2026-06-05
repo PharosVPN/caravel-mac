@@ -166,7 +166,7 @@ final class TunnelController: ObservableObject {
         lastError = nil
         let path = Profiles.path(selectedProfile).path
         Task.detached {
-            if !helperInstalled() {
+            if !helperInstalled() || helperIsStale() {
                 if let err = ensureHelper() {
                     await MainActor.run { [weak self] in self?.lastError = err; self?.status = .disconnected }
                     return
@@ -203,6 +203,19 @@ func caravelBinPath() -> String {
 // helperInstalled reports whether the root LaunchDaemon is installed.
 func helperInstalled() -> Bool {
     FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/org.pharosvpn.caravel.helper.plist")
+}
+
+// helperIsStale reports whether the installed daemon differs from the app's
+// bundled worker (file-size proxy), so a freshly-installed app reinstalls the
+// daemon on the next connect — picking up worker changes like the RX/TX stats
+// writer. Conservative: if it can't compare, it does not force a reinstall.
+func helperIsStale() -> Bool {
+    let fm = FileManager.default
+    guard let installed = try? fm.attributesOfItem(atPath: "/Library/Application Support/PharosVPN/caravel-mac")[.size] as? Int,
+          let bundledPath = Bundle.main.resourceURL?.appendingPathComponent("caravel-mac").path,
+          let bundled = try? fm.attributesOfItem(atPath: bundledPath)[.size] as? Int
+    else { return false }
+    return installed != bundled
 }
 
 // ensureHelper installs the privileged helper via the system authorization

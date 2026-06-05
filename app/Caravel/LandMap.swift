@@ -143,10 +143,18 @@ struct LandMap: View {
         ctx.fill(land, with: .color(Color(red: 0.11, green: 0.15, blue: 0.21)))
         ctx.stroke(land, with: .color(Color(red: 0.20, green: 0.28, blue: 0.38)), lineWidth: 0.5)
 
-        // arcs + flowing traffic
+        // arcs + flowing traffic — each arc is a screen-space bow away from the
+        // pin centroid, so a chain splays out instead of one great circle cutting
+        // through another node.
+        let pinPts = pins.map { geo.project($0.coord, fit) }
+        let centroid = pinPts.isEmpty
+            ? CGPoint(x: size.width / 2, y: size.height / 2)
+            : CGPoint(x: pinPts.map(\.x).reduce(0, +) / CGFloat(pinPts.count),
+                      y: pinPts.map(\.y).reduce(0, +) / CGFloat(pinPts.count))
         for arc in arcs {
-            let screen = arc.points.map { geo.project($0, fit) }
-            guard screen.count > 1 else { continue }
+            let projected = arc.points.map { geo.project($0, fit) }
+            guard let a = projected.first, let b = projected.last else { continue }
+            let screen = bowedArc(a, b, awayFrom: centroid)
             let color = arc.style == .controlPlane ? LandMap.control : (connected ? .green : LandMap.teal)
             var path = Path(); path.move(to: screen[0]); for p in screen.dropFirst() { path.addLine(to: p) }
             ctx.stroke(path, with: .color(color.opacity(0.85)),
@@ -173,6 +181,29 @@ struct LandMap: View {
             let p = geo.project(pin.coord, fit)
             drawPin(ctx, at: p, pin: pin, t: t)
         }
+    }
+
+    // bowedArc samples a screen-space quadratic-bezier arc that bows perpendicular
+    // to the chord, on the side away from `center` (the pin centroid). Bowing
+    // outward keeps chained arcs from overlapping and from slicing through other
+    // nodes the way a raw great circle does.
+    private func bowedArc(_ a: CGPoint, _ b: CGPoint, awayFrom center: CGPoint, steps: Int = 48) -> [CGPoint] {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let len = hypot(dx, dy)
+        guard len > 1 else { return [a, b] }
+        var nx = -dy / len, ny = dx / len // unit perpendicular
+        let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        if nx * (mid.x - center.x) + ny * (mid.y - center.y) < 0 { nx = -nx; ny = -ny }
+        let bow = min(len * 0.20, 110)
+        let c = CGPoint(x: mid.x + nx * bow, y: mid.y + ny * bow)
+        var out: [CGPoint] = []
+        out.reserveCapacity(steps + 1)
+        for i in 0...steps {
+            let u = CGFloat(i) / CGFloat(steps), v = 1 - u
+            out.append(CGPoint(x: v * v * a.x + 2 * v * u * c.x + u * u * b.x,
+                               y: v * v * a.y + 2 * v * u * c.y + u * u * b.y))
+        }
+        return out
     }
 
     private func drawPin(_ ctx: GraphicsContext, at p: CGPoint, pin: MapPin, t: Double) {
