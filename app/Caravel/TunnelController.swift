@@ -96,6 +96,25 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    // deleteProfile removes a file-imported profile. Cloud-synced profiles can't be
+    // deleted (they'd re-sync from the controller) — disable them instead.
+    func deleteProfile(_ name: String) {
+        guard !(profiles.first { $0.name == name }?.cloudSynced ?? false) else { return }
+        if state?.profile == name { disconnect() }
+        Profiles.delete(name)
+        if selectedProfile == name { selectedProfile = "" }
+        reloadProfiles()
+        lastError = nil
+    }
+
+    // setProfileDisabled toggles a profile off/on — the only client action allowed
+    // on a cloud-synced profile.
+    func setProfileDisabled(_ name: String, _ disabled: Bool) {
+        if disabled, state?.profile == name { disconnect() }
+        Profiles.setDisabled(name, disabled)
+        reloadProfiles()
+    }
+
     var selectedInfo: ProfileInfo? { profiles.first { $0.name == selectedProfile } }
     var connected: Bool { status == .connected }
 

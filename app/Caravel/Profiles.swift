@@ -46,6 +46,11 @@ struct ProfileInfo: Identifiable, Equatable {
     var enc: String
     var nodes: [NodeInfo]
     var path: PathView?
+    // cloudSynced profiles come from the controller (account sync) — the client
+    // may DISABLE them (they'd just re-sync) but never delete. File-imported
+    // profiles can be deleted outright.
+    var cloudSynced: Bool = false
+    var disabled: Bool = false
 
     var id: String { name }
     var readable: Bool { enc == "none" }
@@ -67,12 +72,32 @@ enum Profiles {
 
     static func path(_ name: String) -> URL { dir.appendingPathComponent("\(name).pharos") }
 
+    // Sidecar markers: `<name>.synced` is written by account-sync (a cloud profile,
+    // disable-only), `<name>.disabled` toggles a profile off.
+    static func markerURL(_ name: String, _ ext: String) -> URL { dir.appendingPathComponent("\(name).\(ext)") }
+    static func isCloudSynced(_ name: String) -> Bool { FileManager.default.fileExists(atPath: markerURL(name, "synced").path) }
+    static func isDisabled(_ name: String) -> Bool { FileManager.default.fileExists(atPath: markerURL(name, "disabled").path) }
+
+    // delete removes a file-imported profile and its markers. Cloud-synced
+    // profiles must not be deleted (they'd re-sync) — disable them instead.
+    static func delete(_ name: String) {
+        guard !isCloudSynced(name) else { return }
+        try? FileManager.default.removeItem(at: path(name))
+        try? FileManager.default.removeItem(at: markerURL(name, "disabled"))
+    }
+
+    static func setDisabled(_ name: String, _ disabled: Bool) {
+        let u = markerURL(name, "disabled")
+        if disabled { try? Data().write(to: u) } else { try? FileManager.default.removeItem(at: u) }
+    }
+
     static func peek(_ url: URL) -> ProfileInfo {
         let name = url.deletingPathExtension().lastPathComponent
+        let synced = isCloudSynced(name), off = isDisabled(name)
         guard let data = try? Data(contentsOf: url),
               let env = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               env["fmt"] as? String == "pharos-profile" else {
-            return ProfileInfo(name: name, enc: "?", nodes: [])
+            return ProfileInfo(name: name, enc: "?", nodes: [], cloudSynced: synced, disabled: off)
         }
         let enc = env["enc"] as? String ?? "?"
         var nodes: [NodeInfo] = []
@@ -88,7 +113,7 @@ enum Profiles {
             }
             path = parsePath(payload["path"])
         }
-        return ProfileInfo(name: name, enc: enc, nodes: nodes, path: path)
+        return ProfileInfo(name: name, enc: enc, nodes: nodes, path: path, cloudSynced: synced, disabled: off)
     }
 
     // parsePath reads the optional egress-chain display metadata (entry → [mid]
