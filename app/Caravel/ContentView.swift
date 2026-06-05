@@ -19,7 +19,6 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .frame(minWidth: 1040, idealWidth: 1320, minHeight: 720, idealHeight: 860)
-        .background(WindowAccessor())
     }
 
     private var sidebar: some View {
@@ -219,14 +218,3 @@ struct ContentView: View {
     }
 }
 
-// WindowAccessor reaches the hosting NSWindow to make it grab-anywhere draggable
-// (the title bar is hidden), so the header double-click-to-maximize and window
-// dragging both feel natural without a visible title bar.
-struct WindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async { [weak v] in v?.window?.isMovableByWindowBackground = true }
-        return v
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-}
