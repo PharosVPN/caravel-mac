@@ -34,7 +34,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PharosVPN/caravel/core/deviceid"
 	"github.com/PharosVPN/caravel/core/profile"
+	csync "github.com/PharosVPN/caravel/core/sync"
 	"github.com/PharosVPN/caravel/core/vp"
 	"github.com/amnezia-vpn/amneziawg-go/device"
 	"github.com/amnezia-vpn/amneziawg-go/tun"
@@ -58,6 +60,8 @@ func dispatch(args []string) error {
 		return cmdConnect(args[1:])
 	case "import":
 		return cmdImport(args[1:])
+	case "sync":
+		return cmdSync(args[1:])
 	case "list", "ls":
 		return cmdList(args[1:])
 	case "rm", "remove":
@@ -89,6 +93,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `caravel-mac — PharosVPN macOS client
 
   caravel-mac import <file.pharos> [--name NAME]   store a profile
+  caravel-mac sync <file.pharosid> [--email E] [--password PW] [--name NAME]
+                                                   fetch your profile from the controller
   caravel-mac list                                 list stored profiles
   caravel-mac rm <name>                            forget a profile
   caravel-mac status                               show whether a tunnel is up
@@ -157,6 +163,142 @@ func cmdImport(args []string) error {
 	}
 	fmt.Printf("imported profile %q → %s\n", n, path)
 	return nil
+}
+
+// cmdSync fetches the account's end-to-end-encrypted profile from the controller
+// (through the relay named in the `.pharosid` bundle), decrypts it on-device, and
+// stores it as a connectable profile marked cloud-synced. The controller only
+// ever served ciphertext.
+func cmdSync(args []string) error {
+	var src, name, email, password string
+	havePW := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := func() (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			return args[i], nil
+		}
+		var err error
+		switch {
+		case a == "--name":
+			name, err = val()
+		case a == "--email":
+			email, err = val()
+		case a == "--password":
+			password, err = val()
+			havePW = true
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
+		case strings.HasPrefix(a, "--email="):
+			email = strings.TrimPrefix(a, "--email=")
+		case strings.HasPrefix(a, "--password="):
+			password, havePW = strings.TrimPrefix(a, "--password="), true
+		case !strings.HasPrefix(a, "-") && src == "":
+			src = a
+		default:
+			return fmt.Errorf("unexpected argument %q (usage: caravel-mac sync <file.pharosid> [--email E] [--password PW] [--name NAME])", a)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if src == "" {
+		return errors.New("usage: caravel-mac sync <file.pharosid> [--email E] [--password PW] [--name NAME]")
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	bundle, err := deviceid.Parse(data)
+	if err != nil {
+		return err
+	}
+	if email == "" {
+		email = bundle.User
+	}
+	if email == "" {
+		return errors.New("no account email — pass --email (the bundle has no user)")
+	}
+	if !havePW {
+		fmt.Fprintf(os.Stderr, "account passphrase for %s: ", email)
+		pw, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return fmt.Errorf("read passphrase: %w", err)
+		}
+		password = string(pw)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	res, err := csync.Fetch(ctx, bundle, email, password)
+	if errors.Is(err, csync.ErrNoProfile) {
+		return fmt.Errorf("signed in as %s, but no profile has been issued for this account yet", email)
+	}
+	if err != nil {
+		return err
+	}
+
+	env, err := profile.WrapPlaintext(res.Plaintext)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		name = syncProfileName(email)
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	path, err := st.Import(name, env)
+	if err != nil {
+		return err
+	}
+	// Mark it cloud-synced (the app shows synced profiles as disable-only, never
+	// delete) and stash the bundle next to it so a later refresh needs no re-import.
+	marker, _ := json.Marshal(map[string]any{"user": email, "revision": res.Revision, "relay": bundle.RelayAddr})
+	_ = os.WriteFile(filepath.Join(st.Dir(), name+".synced"), marker, 0o600)
+	_ = os.WriteFile(filepath.Join(st.Dir(), name+deviceid.Extension), data, 0o600)
+
+	// Summarize the nodes the synced profile carries.
+	var summary struct {
+		User  string `json:"user"`
+		Nodes []struct {
+			Name   string `json:"name"`
+			Region string `json:"region"`
+		} `json:"nodes"`
+	}
+	_ = json.Unmarshal(res.Plaintext, &summary)
+	fmt.Printf("synced profile %q (rev %d, %d node(s)) → %s\n", name, res.Revision, len(summary.Nodes), path)
+	for _, n := range summary.Nodes {
+		fmt.Printf("  · %s (%s)\n", n.Name, n.Region)
+	}
+	fmt.Printf("connect with:  sudo caravel-mac connect --profile %s\n", name)
+	return nil
+}
+
+// syncProfileName derives a stable store name from an account email.
+func syncProfileName(email string) string {
+	n := email
+	if at := strings.IndexByte(n, '@'); at > 0 {
+		n = n[:at]
+	}
+	n = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, n)
+	if n == "" {
+		n = "account"
+	}
+	return n
 }
 
 func cmdList(args []string) error {
