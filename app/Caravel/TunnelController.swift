@@ -96,6 +96,42 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    // pickDeviceBundle opens a panel to choose a `.pharosid` device file (the
+    // offline identity `cox devices issue` produces). Returns nil if cancelled.
+    func pickDeviceBundle() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose your .pharosid device file"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "pharosid") ?? .data]
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    // syncFromController fetches the account's end-to-end-encrypted profile from
+    // the controller (through the relay in the device bundle), decrypts it on this
+    // Mac, and stores it as a cloud-synced profile — the GUI counterpart of
+    // `caravel-mac sync`. The controller only ever serves ciphertext.
+    func syncFromController(bundle: URL, email: String, password: String) {
+        status = .connecting // reuse the busy state for the spinner
+        lastError = nil
+        Task.detached {
+            let (name, err) = runSync(bundle: bundle.path, email: email, password: password)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.status = self.state == nil ? .disconnected : .connected
+                if let err {
+                    self.lastError = "sync failed: \(err)"
+                    return
+                }
+                self.reloadProfiles()
+                if let name, self.profiles.contains(where: { $0.name == name }) {
+                    self.selectedProfile = name
+                }
+                self.lastError = nil
+            }
+        }
+    }
+
     // deleteProfile removes a file-imported profile. Cloud-synced profiles can't be
     // deleted (they'd re-sync from the controller) — disable them instead.
     func deleteProfile(_ name: String) {
@@ -285,6 +321,40 @@ func runCtl(_ args: [String]) -> String? {
         return msg.isEmpty ? "ctl exited \(p.terminationStatus)" : msg
     }
     return nil
+}
+
+// runSync runs `caravel-mac sync`, piping the account passphrase on stdin so it
+// never lands in the argv / process table. Returns the stored profile name (on
+// success) and an error string (on failure).
+func runSync(bundle: String, email: String, password: String) -> (name: String?, error: String?) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: caravelBinPath())
+    var args = ["sync", bundle]
+    if !email.isEmpty { args += ["--email", email] }
+    args += ["--password-stdin"]
+    p.arguments = args
+    let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
+    p.standardInput = inPipe
+    p.standardOutput = outPipe
+    p.standardError = errPipe
+    do { try p.run() } catch { return (nil, error.localizedDescription) }
+    inPipe.fileHandleForWriting.write(Data((password + "\n").utf8))
+    try? inPipe.fileHandleForWriting.close()
+    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    if p.terminationStatus != 0 {
+        let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (nil, msg.isEmpty ? "sync exited \(p.terminationStatus)" : msg)
+    }
+    // Worker prints: synced profile "NAME" (rev N, …) — pull NAME out for selection.
+    let out = String(data: outData, encoding: .utf8) ?? ""
+    var name: String?
+    if let lo = out.firstIndex(of: "\""),
+       let hi = out[out.index(after: lo)...].firstIndex(of: "\"") {
+        name = String(out[out.index(after: lo)..<hi])
+    }
+    return (name, nil)
 }
 
 // processAlive reports whether a pid names a live process (kill -0).

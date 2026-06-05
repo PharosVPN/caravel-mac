@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -190,6 +191,14 @@ func cmdSync(args []string) error {
 		case a == "--password":
 			password, err = val()
 			havePW = true
+		case a == "--password-stdin":
+			// Read the passphrase from stdin so it never appears in the process
+			// table (the GUI pipes it here).
+			pw, rerr := io.ReadAll(os.Stdin)
+			if rerr != nil {
+				return fmt.Errorf("read passphrase from stdin: %w", rerr)
+			}
+			password, havePW = strings.TrimRight(string(pw), "\r\n"), true
 		case strings.HasPrefix(a, "--name="):
 			name = strings.TrimPrefix(a, "--name=")
 		case strings.HasPrefix(a, "--email="):
