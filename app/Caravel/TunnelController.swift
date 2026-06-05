@@ -261,8 +261,8 @@ func ensureHelper() -> String? {
 func runCtlWaiting(_ args: [String]) -> String? {
     var err = runCtl(args)
     var tries = 0
-    while let e = err, e.contains("not reachable") || e.contains("refused"), tries < 12 {
-        usleep(400_000) // 0.4s, up to ~5s
+    while let e = err, e.contains("not reachable") || e.contains("refused"), tries < 30 {
+        usleep(400_000) // 0.4s, up to ~12s — covers a freshly-bootstrapped daemon
         err = runCtl(args)
         tries += 1
     }

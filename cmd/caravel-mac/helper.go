@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -62,6 +64,19 @@ func cmdInstallHelper(_ []string) error {
 	}
 	_ = exec.Command("launchctl", "enable", label).Run()
 	_ = exec.Command("launchctl", "kickstart", "-k", label).Run() // (re)start now, don't wait for relaunch
+
+	// kickstart returns before the daemon binds its control socket, so the app's
+	// first connect raced and failed until an app restart. Wait here (we're the
+	// privileged installer) until the socket actually ACCEPTS a connection — a
+	// dial probe, not a file-exists check, since a stale socket file may linger
+	// until the new daemon removes and rebinds it.
+	for i := 0; i < 60; i++ {
+		if c, err := net.DialTimeout("unix", controlSocket, 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 	fmt.Println("caravel-mac helper installed and running — connect/disconnect no longer prompt")
 	return nil
 }
