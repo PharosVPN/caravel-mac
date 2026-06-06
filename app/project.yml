@@ -19,6 +19,8 @@ targets:
         PRODUCT_NAME: PharosVPN
         SWIFT_VERSION: "5.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+        # App icon from Caravel/Assets.xcassets (the maroon Pharos beacon mark).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Personal build: hardened runtime OFF so the app can launch the bundled
         # caravel-mac worker; no app sandbox (the worker needs root via the auth
         # prompt, and we read a system state file). package.sh re-signs with the
@@ -31,5 +33,6 @@ targets:
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.utilities
         CFBundleDisplayName: PharosVPN
+        CFBundleIconName: AppIcon
         # A plain window app (no Dock-only/agent); shows in the Dock + menu bar.
         LSUIElement: false
