@@ -25,9 +25,10 @@ const controlSocket = "/Library/Application Support/PharosVPN/control.sock"
 // ctlRequest / ctlResponse are the newline-free JSON control protocol.
 type ctlRequest struct {
 	Op       string `json:"op"`                 // connect | disconnect | status
-	Profile  string `json:"profile,omitempty"`  // absolute .pharos path (connect)
+	Profile  string `json:"profile,omitempty"`  // absolute .pharos bundle path (connect)
+	Name     string `json:"name,omitempty"`     // named profile within the bundle (connect)
 	Password string `json:"password,omitempty"` // password-mode profiles (connect)
-	Proto    string `json:"proto,omitempty"`    // auto|amneziawg|xray (connect; default auto)
+	Proto    string `json:"proto,omitempty"`    // auto|amneziawg|xray when no name (connect; default auto)
 	Full     *bool  `json:"full,omitempty"`     // full-tunnel (default true)
 }
 
@@ -103,7 +104,7 @@ func (d *daemon) handle(conn net.Conn) {
 		if req.Full != nil {
 			full = *req.Full
 		}
-		if err := d.connect(req.Profile, req.Password, req.Proto, full); err != nil {
+		if err := d.connect(req.Profile, req.Name, req.Password, req.Proto, full); err != nil {
 			resp = ctlResponse{Error: err.Error(), Status: "disconnected"}
 		} else {
 			resp = d.statusResp()
@@ -119,7 +120,7 @@ func (d *daemon) handle(conn net.Conn) {
 	_ = json.NewEncoder(conn).Encode(resp)
 }
 
-func (d *daemon) connect(profilePath, password, proto string, full bool) error {
+func (d *daemon) connect(profilePath, name, password, proto string, full bool) error {
 	if profilePath == "" {
 		return errors.New("profile path is required")
 	}
@@ -127,7 +128,7 @@ func (d *daemon) connect(profilePath, password, proto string, full bool) error {
 	if err != nil {
 		return fmt.Errorf("read profile: %w", err)
 	}
-	spec, err := resolveProfileSpec(data, "", password, proto)
+	spec, err := resolveProfileSpec(data, name, "", password, proto)
 	if err != nil {
 		return err
 	}
@@ -215,14 +216,19 @@ func cmdCtl(args []string) error {
 	switch args[0] {
 	case "connect":
 		if len(args) < 2 {
-			return errors.New("usage: caravel-mac ctl connect <profile-path> [--protocol auto|amneziawg|xray] [--password PW]")
+			return errors.New("usage: caravel-mac ctl connect <bundle-path> [--name PROFILE] [--protocol auto|amneziawg|xray] [--password PW]")
 		}
 		req.Op = "connect"
 		req.Profile = args[1]
-		// Remaining args: --protocol/--password flags, plus a bare positional
+		// Remaining args: --name/--protocol/--password flags, plus a bare positional
 		// password for back-compat with older callers.
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
+			case "--name":
+				if i+1 < len(args) {
+					req.Name = args[i+1]
+					i++
+				}
 			case "--protocol":
 				if i+1 < len(args) {
 					req.Proto = args[i+1]

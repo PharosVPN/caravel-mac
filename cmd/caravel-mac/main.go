@@ -65,6 +65,8 @@ func dispatch(args []string) error {
 		return cmdSync(args[1:])
 	case "list", "ls":
 		return cmdList(args[1:])
+	case "profiles":
+		return cmdProfiles(args[1:])
 	case "rm", "remove":
 		return cmdRemove(args[1:])
 	case "status":
@@ -93,19 +95,22 @@ func dispatch(args []string) error {
 func usage() {
 	fmt.Fprint(os.Stderr, `caravel-mac — PharosVPN macOS client
 
-  caravel-mac import <file.pharos> [--name NAME]   store a profile
+  caravel-mac import <file.pharos> [--name NAME]   store a bundle
   caravel-mac sync <file.pharosid> [--email E] [--password PW] [--name NAME]
-                                                   fetch your profile from the controller
-  caravel-mac list                                 list stored profiles
-  caravel-mac rm <name>                            forget a profile
+                                                   fetch your bundle from the controller
+  caravel-mac list                                 list stored bundles
+  caravel-mac profiles <bundle> [--password PW]    list a bundle's named profiles
+  caravel-mac rm <name>                            forget a bundle
   caravel-mac status                               show whether a tunnel is up
-  sudo caravel-mac connect --profile NAME [--password PW] [--node ID]
+  sudo caravel-mac connect --profile BUNDLE --name PROFILE [--password PW]
   sudo caravel-mac connect --config FILE.json      legacy inline JSON config
 
 connect flags:
-  --profile NAME|PATH   a stored profile name, or a path to a .pharos file
+  --profile NAME|PATH   a stored bundle name, or a path to a .pharos file
+  --name PROFILE        which named profile in the bundle to connect with
+  --protocol P          when no --name: auto|amneziawg|xray (default auto)
   --config PATH         a JSON tunnel config (legacy / testing)
-  --password PW         password for a password-mode profile (prompted if omitted)
+  --password PW         password for a password-mode bundle (prompted if omitted)
   --node ID             which node in the profile to use (default: the first)
   --full-tunnel         route all traffic through the tunnel (default true)
 `)
@@ -282,20 +287,24 @@ func cmdSync(args []string) error {
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+".synced"), marker, 0o600)
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+deviceid.Extension), data, 0o600)
 
-	// Summarize the nodes the synced profile carries.
+	// Summarize the named profiles the synced bundle carries.
 	var summary struct {
-		User  string `json:"user"`
-		Nodes []struct {
-			Name   string `json:"name"`
-			Region string `json:"region"`
-		} `json:"nodes"`
+		User     string `json:"user"`
+		Profiles []struct {
+			Name     string `json:"name"`
+			Protocol string `json:"protocol"`
+		} `json:"profiles"`
 	}
 	_ = json.Unmarshal(res.Plaintext, &summary)
-	fmt.Printf("synced profile %q (rev %d, %d node(s)) → %s\n", name, res.Revision, len(summary.Nodes), path)
-	for _, n := range summary.Nodes {
-		fmt.Printf("  · %s (%s)\n", n.Name, n.Region)
+	fmt.Printf("synced %q (rev %d, %d profile(s)) → %s\n", name, res.Revision, len(summary.Profiles), path)
+	for _, pr := range summary.Profiles {
+		fmt.Printf("  · %s (%s)\n", pr.Name, pr.Protocol)
 	}
-	fmt.Printf("connect with:  sudo caravel-mac connect --profile %s\n", name)
+	if len(summary.Profiles) > 0 {
+		fmt.Printf("connect with:  sudo caravel-mac connect --profile %s --name %q\n", name, summary.Profiles[0].Name)
+	} else {
+		fmt.Printf("connect with:  sudo caravel-mac connect --profile %s\n", name)
+	}
 	return nil
 }
 
@@ -335,6 +344,54 @@ func cmdList(args []string) error {
 	fmt.Printf("profiles in %s:\n", st.Dir())
 	for _, e := range entries {
 		fmt.Printf("  %-24s  (%s)\n", e.Name, e.Enc)
+	}
+	return nil
+}
+
+// cmdProfiles lists the named profiles inside one bundle (a stored name or a
+// .pharos path), so the user can see what to pass to `connect --name`.
+func cmdProfiles(args []string) error {
+	fs := flag.NewFlagSet("profiles", flag.ContinueOnError)
+	password := fs.String("password", "", "password for a password-mode bundle (prompted if omitted)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: caravel-mac profiles <bundle-name|path> [--password PW]")
+	}
+	ref := fs.Arg(0)
+	data, err := loadProfileBytes(ref)
+	if err != nil {
+		return err
+	}
+	p, err := profile.Parse(data, profile.Options{Password: *password})
+	if errors.Is(err, profile.ErrPasswordNeeded) && *password == "" {
+		pw, perr := promptPassword(fmt.Sprintf("password for bundle %q: ", ref))
+		if perr != nil {
+			return perr
+		}
+		p, err = profile.Parse(data, profile.Options{Password: pw})
+	}
+	if err != nil {
+		return err
+	}
+	if len(p.Profiles) == 0 {
+		fmt.Printf("bundle %q carries no profiles\n", ref)
+		return nil
+	}
+	fmt.Printf("profiles in %q:\n", ref)
+	for _, cp := range p.Profiles {
+		egress := "direct"
+		if cp.Path != nil {
+			hops := make([]string, len(cp.Path.Hops))
+			for i, h := range cp.Path.Hops {
+				hops[i] = h.Name
+			}
+			egress = "cascade " + strings.Join(hops, " → ")
+		} else if len(cp.Nodes) > 0 {
+			egress = cp.Nodes[0].Name
+		}
+		fmt.Printf("  %-24s  %-13s  %s\n", cp.Name, cp.Protocol, egress)
 	}
 	return nil
 }
@@ -383,11 +440,12 @@ type dialSpec struct {
 
 func cmdConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	profileRef := fs.String("profile", "", "a stored profile name, or a path to a .pharos file")
+	profileRef := fs.String("profile", "", "a stored bundle name, or a path to a .pharos file")
+	name := fs.String("name", "", "which named profile in the bundle to connect with (default: the first)")
 	cfgPath := fs.String("config", "", "a JSON tunnel config (legacy / testing)")
 	password := fs.String("password", "", "password for a password-mode profile (prompted if omitted)")
 	nodeID := fs.String("node", "", "which node in the profile to use (default: the first)")
-	proto := fs.String("protocol", "auto", "data-plane protocol: auto|amneziawg|xray")
+	proto := fs.String("protocol", "auto", "data-plane protocol when no --name: auto|amneziawg|xray")
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the tunnel")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -401,7 +459,7 @@ func cmdConnect(args []string) error {
 	if *cfgPath != "" {
 		spec, err = specFromConfig(*cfgPath)
 	} else {
-		spec, err = specFromProfile(*profileRef, *nodeID, *proto, password)
+		spec, err = specFromProfile(*profileRef, *name, *nodeID, *proto, password)
 	}
 	if err != nil {
 		return err
@@ -489,42 +547,47 @@ func specFromConfig(path string) (dialSpec, error) {
 	}, nil
 }
 
-// specFromProfile loads a .pharos profile (from the store by name, or a file
-// path) and resolves the chosen node to a dialSpec, prompting for a password if
-// one is needed (the interactive CLI path).
-func specFromProfile(ref, nodeID, proto string, password *string) (dialSpec, error) {
+// specFromProfile loads a .pharos bundle (from the store by name, or a file
+// path) and resolves the chosen named profile to a dialSpec, prompting for a
+// password if one is needed (the interactive CLI path).
+func specFromProfile(ref, name, nodeID, proto string, password *string) (dialSpec, error) {
 	data, err := loadProfileBytes(ref)
 	if err != nil {
 		return dialSpec{}, err
 	}
-	spec, err := resolveProfileSpec(data, nodeID, *password, proto)
+	spec, err := resolveProfileSpec(data, name, nodeID, *password, proto)
 	if errors.Is(err, profile.ErrPasswordNeeded) && *password == "" {
 		pw, perr := promptPassword(fmt.Sprintf("password for profile %q: ", ref))
 		if perr != nil {
 			return dialSpec{}, perr
 		}
 		*password = pw
-		spec, err = resolveProfileSpec(data, nodeID, pw, proto)
+		spec, err = resolveProfileSpec(data, name, nodeID, pw, proto)
 	}
 	return spec, err
 }
 
-// resolveProfileSpec decrypts a .pharos and resolves the chosen node to a
-// dialSpec, without prompting — the form the daemon uses (the password, if any,
-// is supplied by the caller). proto selects the data-plane protocol:
-// "amneziawg", "xray" (REALITY), or "auto"/"" (prefer AmneziaWG, fall back to
-// XRay only if the node offers no AmneziaWG).
-func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, error) {
+// resolveProfileSpec decrypts a .pharos bundle and resolves one of its named
+// profiles to a dialSpec, without prompting — the form the daemon uses (the
+// password, if any, is supplied by the caller). profileName selects which named
+// profile to connect with; when empty, proto picks the first profile of that
+// protocol (so the auto-profiles still respond to --protocol), else the first
+// profile. The chosen profile's own protocol drives the tunnel type.
+func resolveProfileSpec(data []byte, profileName, nodeID, password, proto string) (dialSpec, error) {
 	p, err := profile.Parse(data, profile.Options{Password: password})
 	if err != nil {
 		return dialSpec{}, err
 	}
-	node, err := pickNode(p, nodeID, proto)
+	cp, err := chooseProfile(p, profileName, proto)
+	if err != nil {
+		return dialSpec{}, err
+	}
+	node, err := cp.Node(nodeID)
 	if err != nil {
 		return dialSpec{}, err
 	}
 
-	if wantXRay(node, proto) {
+	if cp.Protocol == profile.ProtocolXRayReality {
 		xt, err := node.XRayTunnel()
 		if err != nil {
 			return dialSpec{}, err
@@ -546,7 +609,7 @@ func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, 
 			allowedIPs: xt.AllowedIPs,
 			address:    xt.Address,
 			mtu:        xt.MTU,
-			label:      fmt.Sprintf("%s/%s [xray]", p.FleetID, xt.NodeName),
+			label:      fmt.Sprintf("%s/%s [xray]", cp.Name, xt.NodeName),
 		}, nil
 	}
 
@@ -569,42 +632,29 @@ func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, 
 		allowedIPs: tun.AllowedIPs,
 		address:    tun.Address,
 		mtu:        tun.MTU,
-		label:      fmt.Sprintf("%s/%s", p.FleetID, tun.NodeName),
+		label:      fmt.Sprintf("%s/%s", cp.Name, tun.NodeName),
 	}, nil
 }
 
-// pickNode chooses which node to dial. An explicit nodeID wins. Otherwise, when
-// XRay is explicitly requested, it picks the first node that actually offers
-// XRay/REALITY (not every node runs it), so "sync → choose XRay → connect" works
-// without the user hand-picking a node. Otherwise it returns the default/entry
-// node.
-func pickNode(p *profile.Profile, nodeID, proto string) (*profile.Node, error) {
-	if nodeID == "" && (proto == "xray" || proto == profile.ProtocolXRayReality) {
-		for i := range p.Nodes {
-			if p.Nodes[i].HasXRayReality() {
-				return &p.Nodes[i], nil
-			}
-		}
-		return nil, profile.ErrNoXRayReality
+// chooseProfile picks which named profile in the bundle to connect with: an
+// explicit name (--name) wins; otherwise --protocol selects the first profile of
+// that protocol (so "connect --protocol xray" still works against the
+// auto-profiles a spec-less device receives); otherwise the first profile.
+func chooseProfile(p *profile.Profile, name, proto string) (*profile.ClientProfile, error) {
+	if name != "" {
+		return p.Select(name)
 	}
-	return p.Node(nodeID)
-}
-
-// wantXRay decides whether to use the node's XRay/REALITY protocol given the
-// caller's preference. "auto"/"" prefers AmneziaWG (the default daily driver)
-// and uses XRay only when the node offers no AmneziaWG.
-func wantXRay(n *profile.Node, pref string) bool {
-	switch pref {
+	switch proto {
 	case "xray", profile.ProtocolXRayReality:
-		return true
-	case "amneziawg", "awg":
-		return false
-	default: // "auto" / ""
-		if _, err := n.Tunnel(); err != nil {
-			return n.HasXRayReality()
+		if cp, err := p.SelectByProtocol(profile.ProtocolXRayReality); err == nil {
+			return cp, nil
 		}
-		return false
+	case "amneziawg", "awg":
+		if cp, err := p.SelectByProtocol(profile.ProtocolAmneziaWG); err == nil {
+			return cp, nil
+		}
 	}
+	return p.Select("")
 }
 
 // loadProfileBytes resolves a --profile reference: a readable file path, else a
