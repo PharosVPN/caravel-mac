@@ -126,7 +126,10 @@ func (d *daemon) connect(profilePath, password string, full bool) error {
 	if err != nil {
 		return fmt.Errorf("read profile: %w", err)
 	}
-	spec, err := resolveProfileSpec(data, "", password)
+	// The daemon/app path uses protocol auto-selection (prefers AmneziaWG, the
+	// default daily driver). The XRay/REALITY path is exercised via the CLI
+	// `connect --protocol xray` for now.
+	spec, err := resolveProfileSpec(data, "", password, "auto")
 	if err != nil {
 		return err
 	}
@@ -141,9 +144,9 @@ func (d *daemon) connect(profilePath, password string, full bool) error {
 	if err != nil {
 		return err
 	}
-	d.tn, d.label, d.endpoint, d.iface, d.since = tn, spec.label, spec.cfg.Endpoint, tn.iface, time.Now()
+	d.tn, d.label, d.endpoint, d.iface, d.since = tn, spec.label, spec.endpoint, tn.iface, time.Now()
 	rx, tx := tn.stats()
-	_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.cfg.Endpoint,
+	_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.endpoint,
 		PID: os.Getpid(), Since: d.since, RX: rx, TX: tx})
 	return nil
 }

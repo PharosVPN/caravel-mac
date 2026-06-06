@@ -5,6 +5,8 @@
 
 # Live-test artifacts (a generated profile holds a client private key)
 /livetest/
+*.pharos
+*.pharosid
 
 # macOS app: XcodeGen-generated project, build output, bundled worker, DMGs
 /app/Caravel.xcodeproj/
