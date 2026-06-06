@@ -53,6 +53,9 @@ final class TunnelController: ObservableObject {
     @Published var state: TunnelState?
     @Published var profiles: [ProfileInfo] = []
     @Published var selectedProfile: String = ""
+    // Data-plane protocol: "auto" (prefer AmneziaWG), "amneziawg", or "xray"
+    // (VLESS+REALITY). Passed to the worker on connect.
+    @Published var proto: String = "auto"
     @Published var lastError: String?
 
     private var timer: Timer?
@@ -220,6 +223,7 @@ final class TunnelController: ObservableObject {
         status = .connecting
         lastError = nil
         let path = Profiles.path(selectedProfile).path
+        let proto = self.proto
         Task.detached {
             var prompted = false
             if !helperInstalled() || helperIsStale() {
@@ -229,14 +233,15 @@ final class TunnelController: ObservableObject {
                 }
                 prompted = true
             }
+            let connectArgs = ["connect", path, "--protocol", proto]
             // A just-(re)installed daemon takes a moment to bind its control socket;
             // poll the connect rather than failing on the first try (the bug that
             // needed an app restart).
-            var err = runCtlWaiting(["connect", path])
+            var err = runCtlWaiting(connectArgs)
             // If it is still unreachable AND we have not already prompted, the
             // daemon was registered but down — (re)bootstrap it once, then retry.
             if let e = err, (e.contains("not reachable") || e.contains("refused")), !prompted {
-                if let ierr = ensureHelper() { err = ierr } else { err = runCtlWaiting(["connect", path]) }
+                if let ierr = ensureHelper() { err = ierr } else { err = runCtlWaiting(connectArgs) }
             }
             await MainActor.run { [weak self] in
                 if let err { self?.lastError = err; self?.status = .disconnected }

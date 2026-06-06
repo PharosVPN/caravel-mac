@@ -519,7 +519,7 @@ func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, 
 	if err != nil {
 		return dialSpec{}, err
 	}
-	node, err := p.Node(nodeID)
+	node, err := pickNode(p, nodeID, proto)
 	if err != nil {
 		return dialSpec{}, err
 	}
@@ -571,6 +571,23 @@ func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, 
 		mtu:        tun.MTU,
 		label:      fmt.Sprintf("%s/%s", p.FleetID, tun.NodeName),
 	}, nil
+}
+
+// pickNode chooses which node to dial. An explicit nodeID wins. Otherwise, when
+// XRay is explicitly requested, it picks the first node that actually offers
+// XRay/REALITY (not every node runs it), so "sync → choose XRay → connect" works
+// without the user hand-picking a node. Otherwise it returns the default/entry
+// node.
+func pickNode(p *profile.Profile, nodeID, proto string) (*profile.Node, error) {
+	if nodeID == "" && (proto == "xray" || proto == profile.ProtocolXRayReality) {
+		for i := range p.Nodes {
+			if p.Nodes[i].HasXRayReality() {
+				return &p.Nodes[i], nil
+			}
+		}
+		return nil, profile.ErrNoXRayReality
+	}
+	return p.Node(nodeID)
 }
 
 // wantXRay decides whether to use the node's XRay/REALITY protocol given the
