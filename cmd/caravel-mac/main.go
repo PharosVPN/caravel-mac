@@ -226,14 +226,18 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	if email == "" {
-		email = bundle.User
+	// Email is optional: with none, sync authenticates by the device's leaf
+	// (cert-auth) and the passphrase never leaves this Mac. An email opts into the
+	// legacy passphrase login.
+	who := bundle.User
+	if email != "" {
+		who = email
 	}
-	if email == "" {
-		return errors.New("no account email — pass --email (the bundle has no user)")
+	if who == "" {
+		who = "your account"
 	}
 	if !havePW {
-		fmt.Fprintf(os.Stderr, "account passphrase for %s: ", email)
+		fmt.Fprintf(os.Stderr, "account passphrase for %s: ", who)
 		pw, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Fprintln(os.Stderr)
 		if err != nil {
@@ -257,7 +261,12 @@ func cmdSync(args []string) error {
 		return err
 	}
 	if name == "" {
-		name = syncProfileName(email)
+		// Default the profile name to the device's friendly alias, else the email.
+		if bundle.Alias != "" {
+			name = syncProfileName(bundle.Alias)
+		} else {
+			name = syncProfileName(email)
+		}
 	}
 	st, err := openStore()
 	if err != nil {
