@@ -371,10 +371,14 @@ type fileConfig struct {
 
 // dialSpec is the unified tunnel input both --config and --profile resolve to.
 type dialSpec struct {
-	cfg     vp.Config
-	address string // bare utun IP
-	mtu     int
-	label   string // for logs
+	proto      string        // "amneziawg" (default) or "xray-reality"
+	cfg        vp.Config     // AmneziaWG config (proto == "amneziawg")
+	xray       vp.XRayConfig // XRay/REALITY config (proto == "xray-reality")
+	endpoint   string        // server host:port to pin to the physical gateway (both)
+	allowedIPs []string      // CIDRs routed into the tunnel (both)
+	address    string        // bare utun IP
+	mtu        int
+	label      string // for logs
 }
 
 func cmdConnect(args []string) error {
@@ -383,6 +387,7 @@ func cmdConnect(args []string) error {
 	cfgPath := fs.String("config", "", "a JSON tunnel config (legacy / testing)")
 	password := fs.String("password", "", "password for a password-mode profile (prompted if omitted)")
 	nodeID := fs.String("node", "", "which node in the profile to use (default: the first)")
+	proto := fs.String("protocol", "auto", "data-plane protocol: auto|amneziawg|xray")
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the tunnel")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -396,7 +401,7 @@ func cmdConnect(args []string) error {
 	if *cfgPath != "" {
 		spec, err = specFromConfig(*cfgPath)
 	} else {
-		spec, err = specFromProfile(*profileRef, *nodeID, password)
+		spec, err = specFromProfile(*profileRef, *nodeID, *proto, password)
 	}
 	if err != nil {
 		return err
@@ -420,7 +425,7 @@ func cmdConnect(args []string) error {
 	since := time.Now()
 	writeTunnelState := func() {
 		rx, tx := tn.stats()
-		_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.cfg.Endpoint,
+		_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.endpoint,
 			PID: os.Getpid(), Since: since, RX: rx, TX: tx})
 	}
 	writeTunnelState()
@@ -442,7 +447,7 @@ func cmdConnect(args []string) error {
 	}()
 
 	fmt.Printf("caravel-mac: tunnel up on %s → %s (%s, full-tunnel=%v). Ctrl-C to disconnect.\n",
-		tn.iface, spec.cfg.Endpoint, spec.label, *fullTunnel)
+		tn.iface, spec.endpoint, spec.label, *fullTunnel)
 	<-ctx.Done()
 	fmt.Println("\ncaravel-mac: disconnecting")
 	return nil
@@ -466,6 +471,7 @@ func specFromConfig(path string) (dialSpec, error) {
 		mtu = 1420
 	}
 	return dialSpec{
+		proto: profile.ProtocolAmneziaWG,
 		cfg: vp.Config{
 			PrivateKey:      fc.PrivateKey,
 			ServerPublicKey: fc.ServerPublicKey,
@@ -475,49 +481,81 @@ func specFromConfig(path string) (dialSpec, error) {
 			Keepalive:       fc.Keepalive,
 			Obfuscation:     fc.Obfuscation,
 		},
-		address: fc.Address,
-		mtu:     mtu,
-		label:   "config",
+		endpoint:   fc.Endpoint,
+		allowedIPs: fc.AllowedIPs,
+		address:    fc.Address,
+		mtu:        mtu,
+		label:      "config",
 	}, nil
 }
 
 // specFromProfile loads a .pharos profile (from the store by name, or a file
 // path) and resolves the chosen node to a dialSpec, prompting for a password if
 // one is needed (the interactive CLI path).
-func specFromProfile(ref, nodeID string, password *string) (dialSpec, error) {
+func specFromProfile(ref, nodeID, proto string, password *string) (dialSpec, error) {
 	data, err := loadProfileBytes(ref)
 	if err != nil {
 		return dialSpec{}, err
 	}
-	spec, err := resolveProfileSpec(data, nodeID, *password)
+	spec, err := resolveProfileSpec(data, nodeID, *password, proto)
 	if errors.Is(err, profile.ErrPasswordNeeded) && *password == "" {
 		pw, perr := promptPassword(fmt.Sprintf("password for profile %q: ", ref))
 		if perr != nil {
 			return dialSpec{}, perr
 		}
 		*password = pw
-		spec, err = resolveProfileSpec(data, nodeID, pw)
+		spec, err = resolveProfileSpec(data, nodeID, pw, proto)
 	}
 	return spec, err
 }
 
 // resolveProfileSpec decrypts a .pharos and resolves the chosen node to a
 // dialSpec, without prompting — the form the daemon uses (the password, if any,
-// is supplied by the caller).
-func resolveProfileSpec(data []byte, nodeID, password string) (dialSpec, error) {
+// is supplied by the caller). proto selects the data-plane protocol:
+// "amneziawg", "xray" (REALITY), or "auto"/"" (prefer AmneziaWG, fall back to
+// XRay only if the node offers no AmneziaWG).
+func resolveProfileSpec(data []byte, nodeID, password, proto string) (dialSpec, error) {
 	p, err := profile.Parse(data, profile.Options{Password: password})
 	if err != nil {
 		return dialSpec{}, err
 	}
-	node, err := p.Node(nodeID)
+	node, err := pickNode(p, nodeID, proto)
 	if err != nil {
 		return dialSpec{}, err
 	}
+
+	if wantXRay(node, proto) {
+		xt, err := node.XRayTunnel()
+		if err != nil {
+			return dialSpec{}, err
+		}
+		return dialSpec{
+			proto: profile.ProtocolXRayReality,
+			xray: vp.XRayConfig{
+				UUID:        xt.UUID,
+				Flow:        xt.Flow,
+				Endpoint:    xt.Endpoint,
+				PublicKey:   xt.PublicKey,
+				ServerName:  xt.ServerName,
+				ShortID:     xt.ShortID,
+				Fingerprint: xt.Fingerprint,
+				AllowedIPs:  xt.AllowedIPs,
+				MTU:         xt.MTU,
+			},
+			endpoint:   xt.Endpoint,
+			allowedIPs: xt.AllowedIPs,
+			address:    xt.Address,
+			mtu:        xt.MTU,
+			label:      fmt.Sprintf("%s/%s [xray]", p.FleetID, xt.NodeName),
+		}, nil
+	}
+
 	tun, err := node.Tunnel()
 	if err != nil {
 		return dialSpec{}, err
 	}
 	return dialSpec{
+		proto: profile.ProtocolAmneziaWG,
 		cfg: vp.Config{
 			PrivateKey:      tun.PrivateKey,
 			ServerPublicKey: tun.ServerPublicKey,
@@ -527,10 +565,46 @@ func resolveProfileSpec(data []byte, nodeID, password string) (dialSpec, error) 
 			Keepalive:       tun.Keepalive,
 			Obfuscation:     toVPObfuscation(tun.Obfuscation),
 		},
-		address: tun.Address,
-		mtu:     tun.MTU,
-		label:   fmt.Sprintf("%s/%s", p.FleetID, tun.NodeName),
+		endpoint:   tun.Endpoint,
+		allowedIPs: tun.AllowedIPs,
+		address:    tun.Address,
+		mtu:        tun.MTU,
+		label:      fmt.Sprintf("%s/%s", p.FleetID, tun.NodeName),
 	}, nil
+}
+
+// pickNode chooses which node to dial. An explicit nodeID wins. Otherwise, when
+// XRay is explicitly requested, it picks the first node that actually offers
+// XRay/REALITY (not every node runs it), so "sync → choose XRay → connect" works
+// without the user hand-picking a node. Otherwise it returns the default/entry
+// node.
+func pickNode(p *profile.Profile, nodeID, proto string) (*profile.Node, error) {
+	if nodeID == "" && (proto == "xray" || proto == profile.ProtocolXRayReality) {
+		for i := range p.Nodes {
+			if p.Nodes[i].HasXRayReality() {
+				return &p.Nodes[i], nil
+			}
+		}
+		return nil, profile.ErrNoXRayReality
+	}
+	return p.Node(nodeID)
+}
+
+// wantXRay decides whether to use the node's XRay/REALITY protocol given the
+// caller's preference. "auto"/"" prefers AmneziaWG (the default daily driver)
+// and uses XRay only when the node offers no AmneziaWG.
+func wantXRay(n *profile.Node, pref string) bool {
+	switch pref {
+	case "xray", profile.ProtocolXRayReality:
+		return true
+	case "amneziawg", "awg":
+		return false
+	default: // "auto" / ""
+		if _, err := n.Tunnel(); err != nil {
+			return n.HasXRayReality()
+		}
+		return false
+	}
 }
 
 // loadProfileBytes resolves a --profile reference: a readable file path, else a
@@ -573,9 +647,16 @@ func promptPassword(prompt string) (string, error) {
 
 // ───────── tunnel (utun + routing) ─────────
 
+// vpTunnel is the common surface of the AmneziaWG (*vp.Tunnel) and XRay/REALITY
+// (*vp.XRayTunnel) engines, so the worker handles both uniformly.
+type vpTunnel interface {
+	Close() error
+	Stats() (rx, tx int64, ok bool)
+}
+
 // tunnel is a running tunnel plus the host network state to undo on close.
 type tunnel struct {
-	vt    *vp.Tunnel
+	vt    vpTunnel
 	iface string
 	undo  []string // route specs to delete on close
 }
@@ -591,9 +672,14 @@ func connect(spec dialSpec, full bool) (*tunnel, error) {
 		return nil, err
 	}
 
-	vt, err := vp.Up(spec.cfg, dev, device.LogLevelError)
+	var vt vpTunnel
+	if spec.proto == profile.ProtocolXRayReality {
+		vt, err = vp.UpXRay(spec.xray, dev)
+	} else {
+		vt, err = vp.Up(spec.cfg, dev, device.LogLevelError)
+	}
 	if err != nil {
-		dev.Close() // vp.Up closes the device on failure, but be safe
+		dev.Close() // vp.Up/UpXRay close the device on failure, but be safe
 		return nil, err
 	}
 
@@ -618,7 +704,7 @@ func (t *tunnel) configureNetwork(spec dialSpec, full bool) error {
 	}
 
 	if !full {
-		for _, cidr := range spec.cfg.AllowedIPs {
+		for _, cidr := range spec.allowedIPs {
 			_ = sh("route", "-n", "add", "-net", cidr, "-interface", t.iface)
 			t.undo = append(t.undo, "net "+cidr)
 		}
@@ -626,10 +712,11 @@ func (t *tunnel) configureNetwork(spec dialSpec, full bool) error {
 	}
 
 	// Pin the server endpoint to the current physical gateway, so the encrypted
-	// WireGuard packets to it don't get routed back into the tunnel.
-	host, _, err := net.SplitHostPort(spec.cfg.Endpoint)
+	// tunnel packets to it (WireGuard UDP, or XRay/REALITY TCP) don't get routed
+	// back into the tunnel.
+	host, _, err := net.SplitHostPort(spec.endpoint)
 	if err != nil {
-		host = spec.cfg.Endpoint
+		host = spec.endpoint
 	}
 	ip, err := net.ResolveIPAddr("ip4", host)
 	if err != nil {

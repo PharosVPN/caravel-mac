@@ -157,6 +157,21 @@ struct ContentView: View {
             Spacer()
         }
 
+        // Protocol picker — pick before connecting. "Auto" prefers AmneziaWG
+        // (fast); "XRay" forces VLESS+REALITY (stealth) and routes to a node that
+        // offers it.
+        if !connected && tunnel.status != .disconnecting {
+            Picker("Protocol", selection: $tunnel.proto) {
+                Text("Auto").tag("auto")
+                Text("AmneziaWG").tag("amneziawg")
+                Text("XRay").tag("xray")
+            }
+            .pickerStyle(.segmented)
+            .disabled(busy)
+            .padding(.top, 6)
+            .help("Auto = AmneziaWG (fast). XRay = VLESS+REALITY (stealth).")
+        }
+
         Button(action: toggle) {
             Text(connected || tunnel.status == .disconnecting ? "Disconnect" : "Connect")
                 .frame(maxWidth: .infinity).padding(.vertical, 5)
