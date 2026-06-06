@@ -59,11 +59,14 @@ struct ProfileInfo: Identifiable, Equatable {
     var id: String { bundle + "/" + profileName }
     var name: String { profileName.isEmpty ? bundle : profileName }
     var readable: Bool { enc == "none" }
+    // isBoth: the profile offers both protocols; the client picks at connect.
+    var isBoth: Bool { proto == "both" }
     // protoBadge is the short protocol label for the row/detail, or nil.
     var protoBadge: String? {
         switch proto {
         case "amneziawg": return "AmneziaWG"
         case "xray-reality", "xray": return "XRay"
+        case "both": return "Both"
         case .some(let p) where !p.isEmpty: return p
         default: return nil
         }

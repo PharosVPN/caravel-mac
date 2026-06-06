@@ -171,16 +171,12 @@ func cmdImport(args []string) error {
 	return nil
 }
 
-// purgeOtherControllers enforces "sync is to one controller": it removes the
-// cloud-synced profiles whose recorded controller (the fleet CA fingerprint in
-// their .synced marker) differs from keepFP, returning how many it removed.
-// Imported profiles (no .synced marker) are never touched, and a profile whose
-// marker predates controller-tagging (empty field) is left alone until it is
-// re-synced. A blank keepFP is a no-op.
-func purgeOtherControllers(dir, keepFP string) int {
-	if keepFP == "" {
-		return 0
-	}
+// purgeCloudProfiles removes every cloud-synced profile (a bundle with a .synced
+// marker) and its sidecars, returning how many it removed. Called before storing
+// a fresh sync so "sync is sync" — the synced set is exactly the latest sync,
+// never accumulating duplicates or stale profiles (including from a previous
+// controller). Imported profiles (no .synced marker) are never touched.
+func purgeCloudProfiles(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -188,16 +184,6 @@ func purgeOtherControllers(dir, keepFP string) int {
 	removed := 0
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".synced") {
-			continue
-		}
-		var m struct {
-			Controller string `json:"controller"`
-		}
-		if b, rErr := os.ReadFile(filepath.Join(dir, e.Name())); rErr == nil {
-			_ = json.Unmarshal(b, &m)
-		}
-		// Keep same-controller profiles, and untagged ones (can't attribute).
-		if m.Controller == "" || m.Controller == keepFP {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".synced")
@@ -315,12 +301,12 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Single-controller sync: cloud profiles belong to exactly one controller.
-	// If this bundle is from a different controller than the existing cloud
-	// profiles, drop those stale ones first — imported profiles (no .synced
-	// marker) are never touched. Keyed on the fleet CA fingerprint.
-	if removed := purgeOtherControllers(st.Dir(), bundle.CAFingerprint); removed > 0 {
-		fmt.Printf("switched controller — removed %d cloud profile(s) from the previous one\n", removed)
+	// Sync is sync: the cloud-synced set is replaced wholesale on every sync, so
+	// it can't accumulate duplicates or leave stale profiles from a previous sync
+	// (or a previous controller). Imported profiles (no .synced marker) are never
+	// touched.
+	if removed := purgeCloudProfiles(st.Dir()); removed > 0 {
+		fmt.Printf("replaced %d previously-synced profile(s)\n", removed)
 	}
 	path, err := st.Import(name, env)
 	if err != nil {
@@ -637,7 +623,16 @@ func resolveProfileSpec(data []byte, profileName, nodeID, password, proto string
 		return dialSpec{}, err
 	}
 
-	if cp.Protocol == profile.ProtocolXRayReality {
+	// The profile's protocol drives the tunnel. A "both" profile offers both on
+	// the entry, so the client picks here: explicit "xray" → REALITY, otherwise
+	// AmneziaWG (the auto/default, fast). The cascade beyond the entry is always
+	// AmneziaWG regardless — protocol only describes the client↔entry hop.
+	useXRay := cp.Protocol == profile.ProtocolXRayReality
+	if cp.Protocol == profile.ProtocolBoth {
+		useXRay = proto == "xray" || proto == profile.ProtocolXRayReality
+	}
+
+	if useXRay {
 		xt, err := node.XRayTunnel()
 		if err != nil {
 			return dialSpec{}, err

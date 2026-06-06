@@ -168,17 +168,29 @@ struct ContentView: View {
             Spacer()
         }
 
-        // The selected profile carries its own egress + protocol — show what
-        // you're about to connect with (no protocol picker; pick a profile).
-        if let info = tunnel.selectedInfo, let badge = info.protoBadge {
-            HStack(spacing: 6) {
-                Image(systemName: badge == "XRay" ? "eye.slash" : "bolt.horizontal")
-                    .font(.caption2).foregroundStyle(teal)
-                Text(badge == "XRay" ? "\(badge) · VLESS+REALITY (stealth)" : "\(badge)")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
+        // A "both" profile offers AmneziaWG and XRay on its entry — let the user
+        // pick before connecting. A single-protocol profile just shows its label.
+        if let info = tunnel.selectedInfo {
+            if info.isBoth && !connected && tunnel.status != .disconnecting {
+                Picker("Protocol", selection: $tunnel.proto) {
+                    Text("Auto").tag("auto")
+                    Text("AmneziaWG").tag("amneziawg")
+                    Text("XRay").tag("xray")
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
+                .padding(.top, 6)
+                .help("This profile offers both. Auto = AmneziaWG (fast); XRay = VLESS+REALITY (stealth).")
+            } else if let badge = info.protoBadge {
+                HStack(spacing: 6) {
+                    Image(systemName: badge == "XRay" ? "eye.slash" : "bolt.horizontal")
+                        .font(.caption2).foregroundStyle(teal)
+                    Text(badge == "XRay" ? "\(badge) · VLESS+REALITY (stealth)" : badge)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.top, 6)
             }
-            .padding(.top, 6)
         }
 
         Button(action: toggle) {

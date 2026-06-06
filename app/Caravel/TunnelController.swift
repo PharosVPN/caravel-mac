@@ -224,6 +224,7 @@ final class TunnelController: ObservableObject {
         let path = Profiles.path(info.bundle).path
         let pname = info.profileName
         let proto = self.proto
+        let isBoth = info.isBoth
         Task.detached {
             var prompted = false
             if !helperInstalled() || helperIsStale() {
@@ -234,12 +235,16 @@ final class TunnelController: ObservableObject {
                 prompted = true
             }
             // The chosen named profile carries its own protocol → connect by --name.
-            // A legacy/opaque bundle (no named profile) falls back to --protocol.
+            // A "both" profile additionally honors --protocol (the picker). A
+            // legacy/opaque bundle (no named profile) falls back to --protocol.
             var connectArgs = ["connect", path]
             if pname.isEmpty {
                 connectArgs += ["--protocol", proto]
             } else {
                 connectArgs += ["--name", pname]
+                if isBoth {
+                    connectArgs += ["--protocol", proto]
+                }
             }
             // A just-(re)installed daemon takes a moment to bind its control socket;
             // poll the connect rather than failing on the first try (the bug that
