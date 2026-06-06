@@ -519,7 +519,7 @@ func cmdConnect(args []string) error {
 	since := time.Now()
 	writeTunnelState := func() {
 		rx, tx := tn.stats()
-		_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.endpoint,
+		_ = writeState(State{Profile: spec.label, Proto: spec.proto, Iface: tn.iface, Endpoint: spec.endpoint,
 			PID: os.Getpid(), Since: since, RX: rx, TX: tx})
 	}
 	writeTunnelState()

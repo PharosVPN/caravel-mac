@@ -205,6 +205,10 @@ struct ContentView: View {
         if connected, let s = tunnel.state {
             Label(s.endpoint, systemImage: "point.3.connected.trianglepath.dotted")
                 .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+            if let proto = s.protoLabel {
+                Label("via \(proto)", systemImage: proto.hasPrefix("XRay") ? "eye.slash" : "bolt.horizontal")
+                    .font(.caption).foregroundStyle(teal).padding(.top, 2)
+            }
             HStack(spacing: 14) {
                 Label(humanBytes(s.rx ?? 0), systemImage: "arrow.down")
                     .foregroundStyle(.green)

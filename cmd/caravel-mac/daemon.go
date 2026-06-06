@@ -46,6 +46,7 @@ type daemon struct {
 	mu       sync.Mutex
 	tn       *tunnel
 	label    string
+	proto    string
 	endpoint string
 	iface    string
 	since    time.Time
@@ -143,9 +144,9 @@ func (d *daemon) connect(profilePath, name, password, proto string, full bool) e
 	if err != nil {
 		return err
 	}
-	d.tn, d.label, d.endpoint, d.iface, d.since = tn, spec.label, spec.endpoint, tn.iface, time.Now()
+	d.tn, d.label, d.proto, d.endpoint, d.iface, d.since = tn, spec.label, spec.proto, spec.endpoint, tn.iface, time.Now()
 	rx, tx := tn.stats()
-	_ = writeState(State{Profile: spec.label, Iface: tn.iface, Endpoint: spec.endpoint,
+	_ = writeState(State{Profile: spec.label, Proto: spec.proto, Iface: tn.iface, Endpoint: spec.endpoint,
 		PID: os.Getpid(), Since: d.since, RX: rx, TX: tx})
 	return nil
 }
@@ -159,7 +160,7 @@ func (d *daemon) statsLoop() {
 		d.mu.Lock()
 		if d.tn != nil {
 			rx, tx := d.tn.stats()
-			_ = writeState(State{Profile: d.label, Iface: d.iface, Endpoint: d.endpoint,
+			_ = writeState(State{Profile: d.label, Proto: d.proto, Iface: d.iface, Endpoint: d.endpoint,
 				PID: os.Getpid(), Since: d.since, RX: rx, TX: tx})
 		}
 		d.mu.Unlock()
@@ -174,7 +175,7 @@ func (d *daemon) disconnect() {
 		d.tn = nil
 		clearState()
 	}
-	d.label, d.endpoint, d.iface = "", "", ""
+	d.label, d.proto, d.endpoint, d.iface = "", "", "", ""
 }
 
 func (d *daemon) statusResp() ctlResponse {

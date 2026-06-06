@@ -38,6 +38,7 @@ func pharosBase() (string, error) {
 // the worker to stop it. It lives next to the profile store.
 type State struct {
 	Profile  string    `json:"profile"`
+	Proto    string    `json:"proto"` // resolved data-plane protocol in use (amneziawg | xray-reality)
 	Iface    string    `json:"iface"`
 	Endpoint string    `json:"endpoint"`
 	PID      int       `json:"pid"`
@@ -97,8 +98,12 @@ func cmdStatus(_ []string) error {
 		fmt.Println("disconnected")
 		return nil
 	}
-	fmt.Printf("connected — profile %q on %s → %s (since %s)  ↓%s ↑%s\n",
-		s.Profile, s.Iface, s.Endpoint, s.Since.Format(time.Kitchen),
+	via := ""
+	if s.Proto != "" {
+		via = " [" + s.Proto + "]"
+	}
+	fmt.Printf("connected — profile %q%s on %s → %s (since %s)  ↓%s ↑%s\n",
+		s.Profile, via, s.Iface, s.Endpoint, s.Since.Format(time.Kitchen),
 		humanBytes(s.RX), humanBytes(s.TX))
 	return nil
 }

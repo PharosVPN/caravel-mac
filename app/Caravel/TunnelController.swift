@@ -24,12 +24,22 @@ enum TunnelStatus: Equatable {
 // file while connected (cmd/caravel-mac/state.go).
 struct TunnelState: Codable {
     var profile: String
+    var proto: String?
     var iface: String
     var endpoint: String
     var pid: Int
     var since: String
     var rx: Int64?
     var tx: Int64?
+
+    // protoLabel is the live data-plane protocol for display, or nil.
+    var protoLabel: String? {
+        switch proto {
+        case "amneziawg": return "AmneziaWG"
+        case "xray-reality", "xray": return "XRay/REALITY"
+        default: return nil
+        }
+    }
 }
 
 // humanBytes formats a byte count compactly (e.g. "1.2 MB").
