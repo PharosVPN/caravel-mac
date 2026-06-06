@@ -71,8 +71,8 @@ final class TunnelController: ObservableObject {
 
     func reloadProfiles() {
         profiles = Profiles.list()
-        if selectedProfile.isEmpty || !profiles.contains(where: { $0.name == selectedProfile }) {
-            selectedProfile = profiles.first?.name ?? ""
+        if selectedProfile.isEmpty || !profiles.contains(where: { $0.id == selectedProfile }) {
+            selectedProfile = profiles.first?.id ?? ""
         }
     }
 
@@ -135,26 +135,25 @@ final class TunnelController: ObservableObject {
         }
     }
 
-    // deleteProfile removes a file-imported profile. Cloud-synced profiles can't be
-    // deleted (they'd re-sync from the controller) — disable them instead.
-    func deleteProfile(_ name: String) {
-        guard !(profiles.first { $0.name == name }?.cloudSynced ?? false) else { return }
-        if state?.profile == name { disconnect() }
-        Profiles.delete(name)
-        if selectedProfile == name { selectedProfile = "" }
+    // deleteProfile removes a file-imported bundle (all its profiles). Cloud-synced
+    // bundles can't be deleted (they'd re-sync from the controller) — disable them
+    // instead. Keyed on the bundle (the .pharos file), since markers are per-bundle.
+    func deleteProfile(_ bundle: String) {
+        guard !(profiles.first { $0.bundle == bundle }?.cloudSynced ?? false) else { return }
+        Profiles.delete(bundle)
+        if selectedInfo?.bundle == bundle { selectedProfile = "" }
         reloadProfiles()
         lastError = nil
     }
 
-    // setProfileDisabled toggles a profile off/on — the only client action allowed
-    // on a cloud-synced profile.
-    func setProfileDisabled(_ name: String, _ disabled: Bool) {
-        if disabled, state?.profile == name { disconnect() }
-        Profiles.setDisabled(name, disabled)
+    // setProfileDisabled toggles a bundle off/on — the only client action allowed
+    // on a cloud-synced bundle.
+    func setProfileDisabled(_ bundle: String, _ disabled: Bool) {
+        Profiles.setDisabled(bundle, disabled)
         reloadProfiles()
     }
 
-    var selectedInfo: ProfileInfo? { profiles.first { $0.name == selectedProfile } }
+    var selectedInfo: ProfileInfo? { profiles.first { $0.id == selectedProfile } }
     var connected: Bool { status == .connected }
 
     // clientCoord is an offline, no-permission approximation of "you": longitude
@@ -219,10 +218,11 @@ final class TunnelController: ObservableObject {
     // brings the tunnel up over the helper's control socket — no prompt per
     // connect after the first install.
     func connect() {
-        guard !selectedProfile.isEmpty else { lastError = "no profile selected"; return }
+        guard let info = selectedInfo else { lastError = "no profile selected"; return }
         status = .connecting
         lastError = nil
-        let path = Profiles.path(selectedProfile).path
+        let path = Profiles.path(info.bundle).path
+        let pname = info.profileName
         let proto = self.proto
         Task.detached {
             var prompted = false
@@ -233,7 +233,14 @@ final class TunnelController: ObservableObject {
                 }
                 prompted = true
             }
-            let connectArgs = ["connect", path, "--protocol", proto]
+            // The chosen named profile carries its own protocol → connect by --name.
+            // A legacy/opaque bundle (no named profile) falls back to --protocol.
+            var connectArgs = ["connect", path]
+            if pname.isEmpty {
+                connectArgs += ["--protocol", proto]
+            } else {
+                connectArgs += ["--name", pname]
+            }
             // A just-(re)installed daemon takes a moment to bind its control socket;
             // poll the connect rather than failing on the first try (the bug that
             // needed an app restart).

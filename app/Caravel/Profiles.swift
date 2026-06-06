@@ -37,23 +37,37 @@ struct PathView: Equatable {
     var hops: [PathHop]
 }
 
-// ProfileInfo is what the UI shows about a stored .pharos. For plaintext (`none`)
-// profiles we can read the nodes for the map + IP list; for password/account we
-// only know the name + mode until the worker connects (the live endpoint then
-// appears via the state file).
+// ProfileInfo is one named profile the UI can connect with — the rendered form
+// of one entry in a bundle's profiles[]. A `.pharos` bundle holds several; the
+// list flattens them so each is independently selectable. `bundle` is the store
+// file (connect's --profile); `profileName` is the entry within it (--name). For
+// plaintext (`none`) we read the nodes for the map + IP list; for
+// password/account we only know the bundle + mode until the worker connects.
 struct ProfileInfo: Identifiable, Equatable {
-    var name: String
+    var bundle: String        // store name (the .pharos file)
+    var profileName: String   // the named profile within the bundle ("" = legacy/opaque)
     var enc: String
+    var proto: String?        // this profile's data-plane protocol
     var nodes: [NodeInfo]
     var path: PathView?
     // cloudSynced profiles come from the controller (account sync) — the client
     // may DISABLE them (they'd just re-sync) but never delete. File-imported
-    // profiles can be deleted outright.
+    // profiles can be deleted outright. Markers are per-bundle.
     var cloudSynced: Bool = false
     var disabled: Bool = false
 
-    var id: String { name }
+    var id: String { bundle + "/" + profileName }
+    var name: String { profileName.isEmpty ? bundle : profileName }
     var readable: Bool { enc == "none" }
+    // protoBadge is the short protocol label for the row/detail, or nil.
+    var protoBadge: String? {
+        switch proto {
+        case "amneziawg": return "AmneziaWG"
+        case "xray-reality", "xray": return "XRay"
+        case .some(let p) where !p.isEmpty: return p
+        default: return nil
+        }
+    }
 }
 
 enum Profiles {
@@ -66,8 +80,8 @@ enum Profiles {
     static func list() -> [ProfileInfo] {
         let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         return items.filter { $0.pathExtension == "pharos" }
-            .map { peek($0) }
-            .sorted { $0.name < $1.name }
+            .flatMap { peek($0) }
+            .sorted { ($0.bundle, $0.name) < ($1.bundle, $1.name) }
     }
 
     static func path(_ name: String) -> URL { dir.appendingPathComponent("\(name).pharos") }
@@ -91,29 +105,42 @@ enum Profiles {
         if disabled { try? Data().write(to: u) } else { try? FileManager.default.removeItem(at: u) }
     }
 
-    static func peek(_ url: URL) -> ProfileInfo {
-        let name = url.deletingPathExtension().lastPathComponent
-        let synced = isCloudSynced(name), off = isDisabled(name)
+    // peek expands one stored bundle into its named profiles (profiles[]). A
+    // plaintext bundle yields one ProfileInfo per named profile; an opaque
+    // (password/account) or unreadable bundle yields a single placeholder whose
+    // details appear once the worker connects.
+    static func peek(_ url: URL) -> [ProfileInfo] {
+        let bundle = url.deletingPathExtension().lastPathComponent
+        let synced = isCloudSynced(bundle), off = isDisabled(bundle)
+        let opaque = { (enc: String) in
+            [ProfileInfo(bundle: bundle, profileName: "", enc: enc, nodes: [], cloudSynced: synced, disabled: off)]
+        }
         guard let data = try? Data(contentsOf: url),
               let env = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               env["fmt"] as? String == "pharos-profile" else {
-            return ProfileInfo(name: name, enc: "?", nodes: [], cloudSynced: synced, disabled: off)
+            return opaque("?")
         }
         let enc = env["enc"] as? String ?? "?"
-        var nodes: [NodeInfo] = []
-        var path: PathView?
-        if enc == "none", let payload = env["payload"] as? [String: Any] {
-            if let raw = payload["nodes"] as? [[String: Any]] {
-                nodes = raw.map { node in
-                    let ips = endpointIPs(node)
-                    return NodeInfo(name: node["name"] as? String ?? "node",
-                                    region: node["region"] as? String,
-                                    ips: ips, activeIP: ips.first, proto: protoLabel(node))
-                }
-            }
-            path = parsePath(payload["path"])
+        guard enc == "none", let payload = env["payload"] as? [String: Any],
+              let profs = payload["profiles"] as? [[String: Any]], !profs.isEmpty else {
+            return opaque(enc)
         }
-        return ProfileInfo(name: name, enc: enc, nodes: nodes, path: path, cloudSynced: synced, disabled: off)
+        return profs.map { pr in
+            let nodesRaw = pr["nodes"] as? [[String: Any]] ?? []
+            let nodes = nodesRaw.map { node -> NodeInfo in
+                let ips = endpointIPs(node)
+                return NodeInfo(name: node["name"] as? String ?? "node",
+                                region: node["region"] as? String,
+                                ips: ips, activeIP: ips.first, proto: protoLabel(node))
+            }
+            return ProfileInfo(bundle: bundle,
+                               profileName: pr["name"] as? String ?? "profile",
+                               enc: enc,
+                               proto: pr["protocol"] as? String,
+                               nodes: nodes,
+                               path: parsePath(pr["path"]),
+                               cloudSynced: synced, disabled: off)
+        }
     }
 
     // parsePath reads the optional egress-chain display metadata (entry → [mid]

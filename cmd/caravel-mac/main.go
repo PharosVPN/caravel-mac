@@ -171,6 +171,44 @@ func cmdImport(args []string) error {
 	return nil
 }
 
+// purgeOtherControllers enforces "sync is to one controller": it removes the
+// cloud-synced profiles whose recorded controller (the fleet CA fingerprint in
+// their .synced marker) differs from keepFP, returning how many it removed.
+// Imported profiles (no .synced marker) are never touched, and a profile whose
+// marker predates controller-tagging (empty field) is left alone until it is
+// re-synced. A blank keepFP is a no-op.
+func purgeOtherControllers(dir, keepFP string) int {
+	if keepFP == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".synced") {
+			continue
+		}
+		var m struct {
+			Controller string `json:"controller"`
+		}
+		if b, rErr := os.ReadFile(filepath.Join(dir, e.Name())); rErr == nil {
+			_ = json.Unmarshal(b, &m)
+		}
+		// Keep same-controller profiles, and untagged ones (can't attribute).
+		if m.Controller == "" || m.Controller == keepFP {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".synced")
+		for _, suffix := range []string{".pharos", ".synced", ".disabled", deviceid.Extension} {
+			_ = os.Remove(filepath.Join(dir, name+suffix))
+		}
+		removed++
+	}
+	return removed
+}
+
 // cmdSync fetches the account's end-to-end-encrypted profile from the controller
 // (through the relay named in the `.pharosid` bundle), decrypts it on-device, and
 // stores it as a connectable profile marked cloud-synced. The controller only
@@ -277,13 +315,25 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Single-controller sync: cloud profiles belong to exactly one controller.
+	// If this bundle is from a different controller than the existing cloud
+	// profiles, drop those stale ones first — imported profiles (no .synced
+	// marker) are never touched. Keyed on the fleet CA fingerprint.
+	if removed := purgeOtherControllers(st.Dir(), bundle.CAFingerprint); removed > 0 {
+		fmt.Printf("switched controller — removed %d cloud profile(s) from the previous one\n", removed)
+	}
 	path, err := st.Import(name, env)
 	if err != nil {
 		return err
 	}
 	// Mark it cloud-synced (the app shows synced profiles as disable-only, never
 	// delete) and stash the bundle next to it so a later refresh needs no re-import.
-	marker, _ := json.Marshal(map[string]any{"user": email, "revision": res.Revision, "relay": bundle.RelayAddr})
+	// `controller` ties it to this fleet so a later sync to a different controller
+	// purges it (see purgeOtherControllers).
+	marker, _ := json.Marshal(map[string]any{
+		"user": email, "revision": res.Revision,
+		"relay": bundle.RelayAddr, "controller": bundle.CAFingerprint,
+	})
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+".synced"), marker, 0o600)
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+deviceid.Extension), data, 0o600)
 

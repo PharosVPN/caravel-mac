@@ -60,26 +60,37 @@ struct ContentView: View {
             List(selection: Binding(get: { tunnel.selectedProfile },
                                     set: { tunnel.selectedProfile = $0 ?? "" })) {
                 ForEach(tunnel.profiles) { p in
-                    HStack {
+                    HStack(spacing: 6) {
                         Image(systemName: p.cloudSynced ? "cloud" : "globe")
                             .font(.caption).foregroundStyle(teal.opacity(0.8))
                         Text(p.name)
                             .strikethrough(p.disabled)
                             .foregroundStyle(p.disabled ? Color.secondary : Color.primary)
+                            .lineLimit(1)
                         Spacer()
-                        Text(p.disabled ? "off" : p.enc).font(.caption2).foregroundStyle(.secondary)
+                        if p.disabled {
+                            Text("off").font(.caption2).foregroundStyle(.secondary)
+                        } else if let badge = p.protoBadge {
+                            Text(badge)
+                                .font(.system(size: 9, weight: .semibold))
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(teal.opacity(0.15), in: Capsule())
+                                .foregroundStyle(teal)
+                        } else {
+                            Text(p.enc).font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
-                    .tag(p.name)
+                    .tag(p.id)
                     .contextMenu {
                         if p.cloudSynced {
                             Button(p.disabled ? "Enable" : "Disable",
                                    systemImage: p.disabled ? "play.circle" : "pause.circle") {
-                                tunnel.setProfileDisabled(p.name, !p.disabled)
+                                tunnel.setProfileDisabled(p.bundle, !p.disabled)
                             }
                             Text("Cloud-synced — can't be deleted, only disabled")
                         } else {
                             Button("Delete…", systemImage: "trash", role: .destructive) {
-                                pendingDelete = p.name
+                                pendingDelete = p.bundle
                             }
                         }
                     }
@@ -157,19 +168,17 @@ struct ContentView: View {
             Spacer()
         }
 
-        // Protocol picker — pick before connecting. "Auto" prefers AmneziaWG
-        // (fast); "XRay" forces VLESS+REALITY (stealth) and routes to a node that
-        // offers it.
-        if !connected && tunnel.status != .disconnecting {
-            Picker("Protocol", selection: $tunnel.proto) {
-                Text("Auto").tag("auto")
-                Text("AmneziaWG").tag("amneziawg")
-                Text("XRay").tag("xray")
+        // The selected profile carries its own egress + protocol — show what
+        // you're about to connect with (no protocol picker; pick a profile).
+        if let info = tunnel.selectedInfo, let badge = info.protoBadge {
+            HStack(spacing: 6) {
+                Image(systemName: badge == "XRay" ? "eye.slash" : "bolt.horizontal")
+                    .font(.caption2).foregroundStyle(teal)
+                Text(badge == "XRay" ? "\(badge) · VLESS+REALITY (stealth)" : "\(badge)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
             }
-            .pickerStyle(.segmented)
-            .disabled(busy)
             .padding(.top, 6)
-            .help("Auto = AmneziaWG (fast). XRay = VLESS+REALITY (stealth).")
         }
 
         Button(action: toggle) {
