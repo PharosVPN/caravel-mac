@@ -42,6 +42,33 @@ struct TunnelState: Codable {
     }
 }
 
+// ControllerStatus mirrors `caravel-mac controller-status` — the cloud session's
+// liveness. reachable is informational (the data plane runs without it).
+struct ControllerStatus: Codable, Equatable {
+    var reachable: Bool
+    var last_synced_at: String?
+    var relay: String?
+    var controller: Endpoint?
+
+    struct Endpoint: Codable, Equatable {
+        var label: String
+        var city: String?
+        var lat: Double
+        var lon: Double
+    }
+
+    // lastSyncedAgo renders the last-sync time compactly (e.g. "3m ago").
+    var lastSyncedAgo: String? {
+        guard let s = last_synced_at,
+              let t = ISO8601DateFormatter().date(from: s) else { return nil }
+        let d = Date().timeIntervalSince(t)
+        if d < 60 { return "just now" }
+        if d < 3600 { return "\(Int(d / 60))m ago" }
+        if d < 86_400 { return "\(Int(d / 3600))h ago" }
+        return "\(Int(d / 86_400))d ago"
+    }
+}
+
 // humanBytes formats a byte count compactly (e.g. "1.2 MB").
 func humanBytes(_ n: Int64) -> String {
     let u: Double = 1024
@@ -67,8 +94,14 @@ final class TunnelController: ObservableObject {
     // (VLESS+REALITY). Passed to the worker on connect.
     @Published var proto: String = "auto"
     @Published var lastError: String?
+    // controller is the cloud session's liveness (reachable + last sync); nil
+    // until refreshed or when no cloud profile is present.
+    @Published var controller: ControllerStatus?
+    // needsLogin asks the UI to open the sync sheet (no stored passphrase).
+    @Published var needsLogin = false
 
     private var timer: Timer?
+    private var ctlTimer: Timer?
     private let stateFile = "/Library/Application Support/PharosVPN/state.json"
 
     func start() {
@@ -76,6 +109,72 @@ final class TunnelController: ObservableObject {
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
+        }
+        // Controller liveness is cheap-but-not-free (a TLS dial) — poll it gently.
+        refreshController()
+        ctlTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshController() }
+        }
+    }
+
+    // cloudInfo is the cloud-synced bundle to act on — the selected one if it is
+    // cloud, else the first cloud profile in the list.
+    var cloudInfo: ProfileInfo? {
+        if let s = selectedInfo, s.cloudSynced { return s }
+        return profiles.first { $0.cloudSynced }
+    }
+    var loggedIn: Bool { Keychain.hasCredential }
+
+    // refreshController re-reads the cloud bundle's controller status (reachable +
+    // last sync + location) off the main thread.
+    func refreshController() {
+        guard let bundle = cloudInfo?.bundle else {
+            controller = nil
+            return
+        }
+        Task.detached {
+            let st = runControllerStatus(bundle: bundle)
+            await MainActor.run { [weak self] in self?.controller = st }
+        }
+    }
+
+    // syncNow re-fetches the cloud bundle using the stored passphrase (one tap).
+    // With no stored passphrase it asks the UI to open the sync sheet.
+    func syncNow() {
+        guard let info = cloudInfo else { return }
+        guard let pass = Keychain.read() else {
+            needsLogin = true
+            return
+        }
+        let pidPath = Profiles.dir.appendingPathComponent(info.bundle + ".pharosid").path
+        status = .connecting // reuse the busy state for the spinner
+        lastError = nil
+        Task.detached {
+            let (_, err) = runSync(bundle: pidPath, email: "", password: pass)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.status = self.state == nil ? .disconnected : .connected
+                if let err { self.lastError = "sync failed: \(err)" }
+                self.reloadProfiles()
+                self.refreshController()
+            }
+        }
+    }
+
+    // logout removes every cloud profile and the stored passphrase, disconnecting
+    // first if a cloud profile is up.
+    func logout() {
+        if state != nil { disconnect() }
+        Task.detached {
+            _ = runWorker(["logout"])
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                Keychain.delete()
+                self.controller = nil
+                self.selectedProfile = ""
+                self.reloadProfiles()
+                self.lastError = nil
+            }
         }
     }
 
@@ -136,10 +235,13 @@ final class TunnelController: ObservableObject {
                     self.lastError = "sync failed: \(err)"
                     return
                 }
+                Keychain.store(password) // logged in — one-tap re-sync from now on
+                self.needsLogin = false
                 self.reloadProfiles()
-                if let name, self.profiles.contains(where: { $0.name == name }) {
-                    self.selectedProfile = name
+                if let name, let first = self.profiles.first(where: { $0.bundle == name }) {
+                    self.selectedProfile = first.id
                 }
+                self.refreshController()
                 self.lastError = nil
             }
         }
@@ -177,6 +279,8 @@ final class TunnelController: ObservableObject {
     // profile carries an egress path, the pins are its ordered hops (entry →
     // [mid] → exit, the exit marked as where traffic leaves); otherwise the
     // entry node(s) the profile lists.
+    var controllerReachable: Bool { controller?.reachable ?? false }
+
     var mapPins: [MapPin] {
         let nodes: [MapPin]
         if let path = selectedInfo?.path {
@@ -192,24 +296,39 @@ final class TunnelController: ObservableObject {
                               active: n.activeIP != nil, kind: .node)
             }
         }
-        guard !nodes.isEmpty else { return [] }
-        return [MapPin(coord: clientCoord, label: "You", sub: nil, active: connected, kind: .client)] + nodes
+        // The controller (control plane), placed from the bundle's embedded coords.
+        var ctlPins: [MapPin] = []
+        if let ctl = selectedInfo?.control {
+            ctlPins.append(MapPin(coord: ctl.coord, label: ctl.city ?? ctl.label,
+                                  sub: "Controller", active: controllerReachable, kind: .controller))
+        }
+        guard !nodes.isEmpty || !ctlPins.isEmpty else { return [] }
+        return [MapPin(coord: clientCoord, label: "You", sub: nil, active: connected, kind: .client)]
+            + ctlPins + nodes
     }
 
     // mapArcs: the data-plane path (dashed) — You → the hop chain. Control-plane
     // (solid) arcs join here once the profile carries them.
     var mapArcs: [MapArc] {
+        var arcs: [MapArc] = []
+        // Data plane (dashed): You → the egress chain / entry node(s).
         let coords: [GeoCoord]
         if let path = selectedInfo?.path {
             coords = path.hops.compactMap { $0.coord }
         } else {
             coords = (selectedInfo?.nodes ?? []).compactMap { $0.coord }
         }
-        guard !coords.isEmpty else { return [] }
-        let chain = [clientCoord] + coords
-        return (0..<(chain.count - 1)).map {
-            MapArc(points: greatCircle(chain[$0], chain[$0 + 1]), style: .dataPlane)
+        if !coords.isEmpty {
+            let chain = [clientCoord] + coords
+            arcs += (0..<(chain.count - 1)).map {
+                MapArc(points: greatCircle(chain[$0], chain[$0 + 1]), style: .dataPlane)
+            }
         }
+        // Control plane (solid): You → the controller, the line you sync over.
+        if let ctl = selectedInfo?.control {
+            arcs.append(MapArc(points: greatCircle(clientCoord, ctl.coord), style: .controlPlane))
+        }
+        return arcs
     }
 
     func poll() {
@@ -382,6 +501,38 @@ func runSync(bundle: String, email: String, password: String) -> (name: String?,
         name = String(out[out.index(after: lo)..<hi])
     }
     return (name, nil)
+}
+
+// runControllerStatus runs `caravel-mac controller-status <bundle>` and decodes
+// the JSON. Returns nil on any failure (treated as "unknown / unreachable").
+func runControllerStatus(bundle: String) -> ControllerStatus? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: caravelBinPath())
+    p.arguments = ["controller-status", bundle]
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = Pipe()
+    do { try p.run() } catch { return nil }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return try? JSONDecoder().decode(ControllerStatus.self, from: data)
+}
+
+// runWorker runs the bundled worker directly (no privilege) — used for `logout`.
+func runWorker(_ args: [String]) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: caravelBinPath())
+    p.arguments = args
+    let errPipe = Pipe()
+    p.standardError = errPipe
+    p.standardOutput = Pipe()
+    do { try p.run(); p.waitUntilExit() } catch { return error.localizedDescription }
+    if p.terminationStatus != 0 {
+        let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let msg = String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return msg.isEmpty ? "worker exited \(p.terminationStatus)" : msg
+    }
+    return nil
 }
 
 // processAlive reports whether a pid names a live process (kill -0).

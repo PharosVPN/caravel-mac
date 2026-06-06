@@ -37,6 +37,16 @@ struct PathView: Equatable {
     var hops: [PathHop]
 }
 
+// ControlInfo is the bundle's control-plane endpoint (the controller, via its
+// relay) for the map — coordinates embedded by coxswain so it places offline.
+struct ControlInfo: Equatable {
+    var label: String
+    var city: String?
+    var lat: Double
+    var lon: Double
+    var coord: GeoCoord { GeoCoord(lat: lat, lon: lon) }
+}
+
 // ProfileInfo is one named profile the UI can connect with — the rendered form
 // of one entry in a bundle's profiles[]. A `.pharos` bundle holds several; the
 // list flattens them so each is independently selectable. `bundle` is the store
@@ -50,6 +60,9 @@ struct ProfileInfo: Identifiable, Equatable {
     var proto: String?        // this profile's data-plane protocol
     var nodes: [NodeInfo]
     var path: PathView?
+    // control is the bundle's controller endpoint (for the map). Per-bundle, so
+    // every profile from the same bundle shares it; nil for imported bundles.
+    var control: ControlInfo?
     // cloudSynced profiles come from the controller (account sync) — the client
     // may DISABLE them (they'd just re-sync) but never delete. File-imported
     // profiles can be deleted outright. Markers are per-bundle.
@@ -128,6 +141,7 @@ enum Profiles {
               let profs = payload["profiles"] as? [[String: Any]], !profs.isEmpty else {
             return opaque(enc)
         }
+        let control = parseControl(payload["control"])
         return profs.map { pr in
             let nodesRaw = pr["nodes"] as? [[String: Any]] ?? []
             let nodes = nodesRaw.map { node -> NodeInfo in
@@ -142,8 +156,21 @@ enum Profiles {
                                proto: pr["protocol"] as? String,
                                nodes: nodes,
                                path: parsePath(pr["path"]),
+                               control: control,
                                cloudSynced: synced, disabled: off)
         }
+    }
+
+    // parseControl reads the bundle's control-plane endpoint (coxswain embeds its
+    // coordinates). Nil when absent or at (0,0) — the client then draws no
+    // controller pin.
+    private static func parseControl(_ raw: Any?) -> ControlInfo? {
+        guard let c = raw as? [String: Any] else { return nil }
+        let lat = (c["lat"] as? Double) ?? 0
+        let lon = (c["lon"] as? Double) ?? 0
+        if lat == 0 && lon == 0 { return nil }
+        return ControlInfo(label: c["label"] as? String ?? "Controller",
+                           city: c["city"] as? String, lat: lat, lon: lon)
     }
 
     // parsePath reads the optional egress-chain display metadata (entry → [mid]

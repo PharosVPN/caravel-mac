@@ -67,6 +67,10 @@ func dispatch(args []string) error {
 		return cmdList(args[1:])
 	case "profiles":
 		return cmdProfiles(args[1:])
+	case "controller-status":
+		return cmdControllerStatus(args[1:])
+	case "logout":
+		return cmdLogout(args[1:])
 	case "rm", "remove":
 		return cmdRemove(args[1:])
 	case "status":
@@ -319,6 +323,7 @@ func cmdSync(args []string) error {
 	marker, _ := json.Marshal(map[string]any{
 		"user": email, "revision": res.Revision,
 		"relay": bundle.RelayAddr, "controller": bundle.CAFingerprint,
+		"synced_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+".synced"), marker, 0o600)
 	_ = os.WriteFile(filepath.Join(st.Dir(), name+deviceid.Extension), data, 0o600)
@@ -429,6 +434,67 @@ func cmdProfiles(args []string) error {
 		}
 		fmt.Printf("  %-24s  %-13s  %s\n", cp.Name, cp.Protocol, egress)
 	}
+	return nil
+}
+
+// cmdControllerStatus reports the cloud-sync state for a bundle as JSON: whether
+// the controller (its relay) is reachable now, when it was last synced + via
+// which relay, and the controller's map location. The app polls this. It needs
+// no passphrase — the stored bundle is plaintext on-device and reachability uses
+// the device leaf in the stashed .pharosid.
+func cmdControllerStatus(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: caravel-mac controller-status <bundle-name|path>")
+	}
+	ref := args[0]
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	name := strings.TrimSuffix(filepath.Base(ref), profile.Extension)
+
+	out := struct {
+		Reachable    bool                     `json:"reachable"`
+		LastSyncedAt string                   `json:"last_synced_at,omitempty"`
+		Relay        string                   `json:"relay,omitempty"`
+		Controller   *profile.ControlEndpoint `json:"controller,omitempty"`
+	}{}
+
+	// The controller's map location, from the (plaintext, on-device) bundle.
+	if data, derr := loadProfileBytes(ref); derr == nil {
+		if p, perr := profile.Parse(data, profile.Options{}); perr == nil {
+			out.Controller = p.Control
+		}
+	}
+	// Last sync + relay, from the .synced sidecar.
+	if mb, merr := os.ReadFile(filepath.Join(st.Dir(), name+".synced")); merr == nil {
+		var m struct {
+			Relay    string `json:"relay"`
+			SyncedAt string `json:"synced_at"`
+		}
+		_ = json.Unmarshal(mb, &m)
+		out.Relay, out.LastSyncedAt = m.Relay, m.SyncedAt
+	}
+	// Live reachability, via the stashed device identity.
+	if pid, perr := os.ReadFile(filepath.Join(st.Dir(), name+deviceid.Extension)); perr == nil {
+		if b, berr := deviceid.Parse(pid); berr == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			out.Reachable = csync.Reachable(ctx, b, 5*time.Second)
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// cmdLogout removes every cloud-synced profile (the GUI also clears the stored
+// passphrase). Imported profiles are kept.
+func cmdLogout(_ []string) error {
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	n := purgeCloudProfiles(st.Dir())
+	fmt.Printf("logged out — removed %d cloud profile(s)\n", n)
 	return nil
 }
 

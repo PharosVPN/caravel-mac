@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var syncBundle: URL?
     @State private var syncEmail = ""
     @State private var syncPassword = ""
+    @State private var showLogout = false
 
     var body: some View {
         HSplitView {
@@ -118,6 +119,10 @@ struct ContentView: View {
                     .padding(.horizontal, 16).padding(.vertical, 8)
             }
 
+            if tunnel.cloudInfo != nil {
+                controllerCard.padding(.horizontal, 16).padding(.top, 8)
+            }
+
             Divider().padding(.vertical, 6)
 
             detail.padding(.horizontal, 16)
@@ -157,6 +162,59 @@ struct ContentView: View {
             }
         }
         .padding(20).frame(width: 400)
+    }
+
+    // controllerCard shows the cloud session: reachability (informational), when
+    // you last synced + via which relay, and the Sync-now / Log-out actions.
+    private var controllerCard: some View {
+        let c = tunnel.controller
+        let reachable = tunnel.controllerReachable
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.caption).foregroundStyle(teal)
+                Text("Controller").font(.caption.weight(.semibold))
+                Spacer()
+                Circle().fill(reachable ? Color.green : Color.gray).frame(width: 6, height: 6)
+                Text(reachable ? "reachable" : "offline").font(.caption2).foregroundStyle(.secondary)
+            }
+            if let ago = c?.lastSyncedAgo {
+                let via = c?.relay.map { " · via \($0)" } ?? ""
+                Text("Last synced \(ago)\(via)")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            } else {
+                Text("Not synced yet").font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                Button { tunnel.syncNow() } label: { Label("Sync now", systemImage: "arrow.clockwise") }
+                    .buttonStyle(.plain).foregroundStyle(teal).disabled(busy)
+                Spacer()
+                Button { showLogout = true } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .padding(.top, 1)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+        .confirmationDialog("Log out of this controller?", isPresented: $showLogout, titleVisibility: .visible) {
+            Button("Log out", role: .destructive) { tunnel.logout() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes all cloud-synced profiles from this Mac and forgets your passphrase. Imported profiles stay — you can sync again anytime.")
+        }
+        .onChange(of: tunnel.needsLogin) { _, need in
+            if need {
+                if let b = tunnel.cloudInfo?.bundle {
+                    syncBundle = Profiles.dir.appendingPathComponent(b + ".pharosid")
+                    syncEmail = ""
+                    syncPassword = ""
+                    syncSheet = true
+                }
+                tunnel.needsLogin = false
+            }
+        }
     }
 
     @ViewBuilder private var detail: some View {
