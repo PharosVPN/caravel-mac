@@ -19,6 +19,11 @@ targets:
         PRODUCT_NAME: PharosVPN
         SWIFT_VERSION: "5.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+        # Default version; package.sh overrides MARKETING_VERSION from the
+        # repo-root VERSION file at build time (xcodegen can't read a file, so
+        # the literal here is just the fallback default).
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
         # App icon from Caravel/Assets.xcassets (the maroon Pharos beacon mark).
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Personal build: hardened runtime OFF so the app can launch the bundled
@@ -30,6 +35,8 @@ targets:
     info:
       path: Caravel/Info.plist
       properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.utilities
         CFBundleDisplayName: PharosVPN

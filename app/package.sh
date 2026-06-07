@@ -17,6 +17,10 @@ BUILD_DIR="$ROOT/build"
 DERIVED="$BUILD_DIR/DerivedData"
 STAGE="$BUILD_DIR/dmg"
 
+# Stamp the build with the semantic version from the repo-root VERSION file.
+VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || true)"
+[ -n "$VERSION" ] || VERSION="0.1.0"
+
 if [ "${NO_SIGN:-0}" = 1 ]; then
   DEVID=""
 else
@@ -38,9 +42,15 @@ command -v xcodegen >/dev/null && xcodegen >/dev/null
 rm -rf "$DERIVED"
 xcodebuild -project Caravel.xcodeproj -scheme "$SCHEME" -configuration Release \
   -derivedDataPath "$DERIVED" \
+  MARKETING_VERSION="$VERSION" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build >/dev/null
 APP="$DERIVED/Build/Products/Release/$APP_NAME.app"
 [ -d "$APP" ] || { echo "!! build failed: $APP not found" >&2; exit 1; }
+# Belt-and-suspenders: stamp the built bundle's Info.plist with the version
+# from VERSION, in case the build setting didn't flow through. Done before the
+# (inside-out) signing so the signature covers the stamped plist.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+echo "    stamped version $VERSION (CFBundleShortVersionString)"
 
 echo "==> (3/5) inject worker into the bundle + sign (inside-out)…"
 mkdir -p "$APP/Contents/Resources"
