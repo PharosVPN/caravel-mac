@@ -13,7 +13,7 @@ for the whole platform.
 macOS is the easiest place to bring the VPN data plane up: full root, a `utun`
 device, and no NetworkExtension entitlement/provisioning dance. So caravel-mac
 is where we make the [`caravel`](https://github.com/PharosVPN/caravel) core
-*real* (AmneziaWG first, then XRay) and validate it against live `buoy` nodes,
+*real* (AmneziaWG first, then XRay) and validate it against live `node` data planes,
 before that same core ships in caravel-ios / caravel-android via gomobile.
 
 ## What it is
