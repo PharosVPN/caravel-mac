@@ -247,6 +247,33 @@ final class TunnelController: ObservableObject {
         }
     }
 
+    // enrollDevice redeems a `pharosvpn://enroll` join link: the worker generates
+    // this Mac's device key on-device, claims the one-time ticket through the relay
+    // (no passphrase), and stores the per-device-sealed profile cloud-marked — the
+    // GUI counterpart of `caravel-mac enroll`. There is no passphrase to keep.
+    func enrollDevice(link: String, deviceName: String) {
+        status = .connecting // reuse the busy state for the spinner
+        lastError = nil
+        Task.detached {
+            let (name, err) = runEnroll(link: link, deviceName: deviceName)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.status = self.state == nil ? .disconnected : .connected
+                if let err {
+                    self.lastError = "enrollment failed: \(err)"
+                    return
+                }
+                self.needsLogin = false
+                self.reloadProfiles()
+                if let name, let first = self.profiles.first(where: { $0.bundle == name }) {
+                    self.selectedProfile = first.id
+                }
+                self.refreshController()
+                self.lastError = nil
+            }
+        }
+    }
+
     // deleteProfile removes a file-imported bundle (all its profiles). Cloud-synced
     // bundles can't be deleted (they'd re-sync from the controller) — disable them
     // instead. Keyed on the bundle (the .pharos file), since markers are per-bundle.
@@ -494,6 +521,36 @@ func runSync(bundle: String, email: String, password: String) -> (name: String?,
         return (nil, msg.isEmpty ? "sync exited \(p.terminationStatus)" : msg)
     }
     // Worker prints: synced profile "NAME" (rev N, …) — pull NAME out for selection.
+    let out = String(data: outData, encoding: .utf8) ?? ""
+    var name: String?
+    if let lo = out.firstIndex(of: "\""),
+       let hi = out[out.index(after: lo)...].firstIndex(of: "\"") {
+        name = String(out[out.index(after: lo)..<hi])
+    }
+    return (name, nil)
+}
+
+// runEnroll runs `caravel-mac enroll <link>`, returning the stored profile name
+// (on success) and an error string (on failure). Enrollment needs no passphrase —
+// the join link carries the one-time ticket; the device key is generated on-device.
+func runEnroll(link: String, deviceName: String) -> (name: String?, error: String?) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: caravelBinPath())
+    var args = ["enroll", link]
+    if !deviceName.isEmpty { args += ["--name", deviceName] }
+    p.arguments = args
+    let outPipe = Pipe(), errPipe = Pipe()
+    p.standardOutput = outPipe
+    p.standardError = errPipe
+    do { try p.run() } catch { return (nil, error.localizedDescription) }
+    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    if p.terminationStatus != 0 {
+        let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (nil, msg.isEmpty ? "enroll exited \(p.terminationStatus)" : msg)
+    }
+    // Worker prints: enrolled "NAME" → path — pull NAME out for selection.
     let out = String(data: outData, encoding: .utf8) ?? ""
     var name: String?
     if let lo = out.firstIndex(of: "\""),

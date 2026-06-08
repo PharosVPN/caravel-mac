@@ -16,6 +16,9 @@ struct ContentView: View {
     @State private var syncEmail = ""
     @State private var syncPassword = ""
     @State private var showLogout = false
+    @State private var enrollSheet = false
+    @State private var enrollLink = ""
+    @State private var enrollName = ""
 
     var body: some View {
         HSplitView {
@@ -55,6 +58,13 @@ struct ContentView: View {
                     }
                 } label: { Image(systemName: "icloud.and.arrow.down") }
                     .buttonStyle(.plain).help("Get from controller (account sync)")
+                    .disabled(busy)
+                Button {
+                    enrollLink = ""
+                    enrollName = ""
+                    enrollSheet = true
+                } label: { Image(systemName: "qrcode.viewfinder") }
+                    .buttonStyle(.plain).help("Enroll a new device with a join link")
                     .disabled(busy)
             }
             .padding(.horizontal, 16)
@@ -112,6 +122,7 @@ struct ContentView: View {
                 Text("Removes this imported profile from this Mac. You can re-import it from its .pharos file.")
             }
             .sheet(isPresented: $syncSheet) { syncSheetView }
+            .sheet(isPresented: $enrollSheet) { enrollSheetView }
 
             if tunnel.profiles.isEmpty {
                 Text("No profiles. Import one:\n caravel-mac import <file.pharos>")
@@ -159,6 +170,35 @@ struct ContentView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(syncPassword.isEmpty || syncBundle == nil)
+            }
+        }
+        .padding(20).frame(width: 400)
+    }
+
+    // enrollSheetView collects a `pharosvpn://enroll` join link and an optional
+    // device name. No passphrase: the worker generates this Mac's device key
+    // on-device and the controller seals the profile to it.
+    private var enrollSheetView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Enroll with a join link").font(.headline)
+            Text("Paste the pharosvpn://enroll link from your admin (or scan its QR and copy the link). No passphrase — your device key is generated here and your profile is sealed to it.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            TextField("pharosvpn://enroll?…", text: $enrollLink)
+                .textFieldStyle(.roundedBorder).disableAutocorrection(true)
+                .font(.system(.caption, design: .monospaced))
+            TextField("Device name (optional, e.g. “My Mac”)", text: $enrollName)
+                .textFieldStyle(.roundedBorder).disableAutocorrection(true)
+            HStack {
+                Spacer()
+                Button("Cancel") { enrollSheet = false }.keyboardShortcut(.cancelAction)
+                Button("Enroll") {
+                    tunnel.enrollDevice(
+                        link: enrollLink.trimmingCharacters(in: .whitespacesAndNewlines),
+                        deviceName: enrollName.trimmingCharacters(in: .whitespaces))
+                    enrollSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!enrollLink.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("pharosvpn://enroll"))
             }
         }
         .padding(20).frame(width: 400)

@@ -35,7 +35,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PharosVPN/caravel/core"
 	"github.com/PharosVPN/caravel/core/deviceid"
+	"github.com/PharosVPN/caravel/core/enroll"
 	"github.com/PharosVPN/caravel/core/profile"
 	csync "github.com/PharosVPN/caravel/core/sync"
 	"github.com/PharosVPN/caravel/core/vp"
@@ -63,6 +65,8 @@ func dispatch(args []string) error {
 		return cmdImport(args[1:])
 	case "sync":
 		return cmdSync(args[1:])
+	case "enroll":
+		return cmdEnroll(args[1:])
 	case "list", "ls":
 		return cmdList(args[1:])
 	case "profiles":
@@ -102,6 +106,8 @@ func usage() {
   caravel-mac import <file.pharos> [--name NAME]   store a bundle
   caravel-mac sync <file.pharosid> [--email E] [--password PW] [--name NAME]
                                                    fetch your bundle from the controller
+  caravel-mac enroll <pharosvpn://enroll?...> [--name NAME] [--platform P]
+                                                   redeem a join link (no passphrase)
   caravel-mac list                                 list stored bundles
   caravel-mac profiles <bundle> [--password PW]    list a bundle's named profiles
   caravel-mac rm <name>                            forget a bundle
@@ -346,6 +352,73 @@ func cmdSync(args []string) error {
 	} else {
 		fmt.Printf("connect with:  sudo caravel-mac connect --profile %s\n", name)
 	}
+	return nil
+}
+
+// cmdEnroll redeems a `pharosvpn://enroll?...` join link into a stored, ready
+// profile WITHOUT any account passphrase: it generates the device's keys
+// on-device, claims the one-time ticket through the relay, assembles the
+// `.pharosid`, syncs the per-device-sealed profile, and stores it cloud-marked —
+// all via the shared core, into the same store the app reads. The GUI shells out
+// to this (mirrors `sync`).
+func cmdEnroll(args []string) error {
+	var link, name, platform string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := func() (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			return args[i], nil
+		}
+		var err error
+		switch {
+		case a == "--name":
+			name, err = val()
+		case a == "--platform":
+			platform, err = val()
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
+		case strings.HasPrefix(a, "--platform="):
+			platform = strings.TrimPrefix(a, "--platform=")
+		case !strings.HasPrefix(a, "-") && link == "":
+			link = a
+		default:
+			return fmt.Errorf("unexpected argument %q (usage: caravel-mac enroll <pharosvpn://enroll?...> [--name NAME] [--platform P])", a)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if link == "" {
+		return errors.New("usage: caravel-mac enroll <pharosvpn://enroll?...> [--name NAME] [--platform P]")
+	}
+	// Validate the link shape up front for a clear error (before the 45s dial).
+	if _, err := enroll.ParseLink(link); err != nil {
+		return err
+	}
+	if platform == "" {
+		platform = "macOS"
+	}
+
+	base, err := pharosBase()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(base, "PharosVPN", "profiles")
+	if err := core.InitStore(dir); err != nil {
+		return err
+	}
+	// core.Enroll generates keys on-device, claims the ticket, assembles the
+	// `.pharosid`, syncs the per-device-sealed profile, and writes the same
+	// `.synced` + `.pharosid` sidecars `sync` does — so the app treats an enrolled
+	// profile exactly like a cloud-synced one.
+	stored, err := core.Enroll(link, name, platform)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("enrolled %q → %s\n", stored, filepath.Join(dir, stored+profile.Extension))
 	return nil
 }
 
